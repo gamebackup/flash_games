@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Early Poptropica</title>
+    <title>Poptropica: Legacy</title>
     <link rel="icon" href="data:,">
     <script>window.RufflePlayer = window.RufflePlayer || {}; window.RufflePlayer.config = { quality: "low" };</script>
     <script src="../../ruffle/ruffle.js"></script>
@@ -21,6 +21,14 @@
             border-radius: 4px; cursor: pointer;
         }
         #accountsBtn:hover { background: #0a5aa8; }
+
+        #fsBtn {
+            position: fixed; left: 10px; bottom: 10px; z-index: 10;
+            font: 12px/1.4 system-ui, sans-serif; padding: 5px 9px;
+            color: #fff; background: #0b6fd0; border: 1px solid #5fb4f5;
+            border-radius: 4px; cursor: pointer;
+        }
+        #fsBtn:hover { background: #0a5aa8; }
 
         #accountsPanel {
             position: fixed; right: 10px; bottom: 46px; z-index: 11;
@@ -72,6 +80,7 @@
     <div id="errorText" hidden>Multiplayer features are unavailable.</div>
 
     <button id="accountsBtn" type="button">Accounts</button>
+    <button id="fsBtn" type="button">Bigger</button>
     <div id="accountsPanel" tabindex="-1" hidden>
         <h2>Local accounts<span>saved in this browser only</span></h2>
         <div id="accountsSave"></div>
@@ -80,6 +89,7 @@
         <div class="accountsActions">
             <button id="accountsExport" type="button">Export</button>
             <button id="accountsImport" type="button">Import</button>
+            <button id="accountsLook" type="button">Change look</button>
         </div>
         <input id="accountsFile" type="file" accept="application/json,.json" hidden>
         <div id="accountsNote"></div>
@@ -157,6 +167,10 @@ function main() {
     // Writing it while the SWF is alive does not stick, because the player flushes its
     // own copy of every shared object over the top when the page unloads.
     if (typeof window.popApplyPendingLogin === "function") window.popApplyPendingLogin();
+    if (typeof window.popRestoreLook === "function") window.popRestoreLook();
+
+    // Those rewrote the character save after the panel first drew it.
+    if (typeof window.popRefreshPanel === "function") window.popRefreshPanel();
 
     const params = getInput();
 
@@ -227,7 +241,11 @@ function fitStage() {
           w = stageSize.w,
           h = stageSize.h + withMenu;
 
-    const k = Math.min(1, (innerWidth - pad) / w, (innerHeight - pad) / h);
+    // Fullscreen hands over the whole screen, so allow growth past native size there;
+    // windowed mode stays capped at 1:1. Either way the transform is safe for input:
+    // Ruffle hit-tests through getBoundingClientRect, so pointer mapping scales with it.
+    const cap = document.fullscreenElement ? 2 : 1;
+    const k = Math.min(cap, (innerWidth - pad) / w, (innerHeight - pad) / h);
 
     stage.style.transform = `scale(${ k })`;
     stage.style.left = `${ Math.max(0, (innerWidth - w * k) / 2) }px`;
@@ -489,6 +507,7 @@ window.popAccounts = function () {
           charBox = document.getElementById("accountsChar"),
           exportBtn = document.getElementById("accountsExport"),
           importBtn = document.getElementById("accountsImport"),
+          lookBtn = document.getElementById("accountsLook"),
           fileInput = document.getElementById("accountsFile"),
           note = document.getElementById("accountsNote"),
           close = document.getElementById("accountsClose");
@@ -618,7 +637,8 @@ window.popAccounts = function () {
 
     const PENDING_LOGIN = "pop.pendingLogin",
           PENDING_CHAR = "pop.pendingChar",
-          ACTIVE_ACCOUNT = "pop.activeAccount";
+          ACTIVE_ACCOUNT = "pop.activeAccount",
+          LOOK_BACKUP = "pop.lookBackup";
 
     /*
        Applied on the next load from main(), before the game mounts: swaps only the
@@ -643,7 +663,13 @@ window.popAccounts = function () {
                 const name = key.slice(key.indexOf("//") + 2),
                       next = Object.assign({}, state, { login: pending });
 
-                if (avatar && typeof avatar === "object") Object.assign(next, avatar);
+                if (avatar && typeof avatar === "object") {
+                    Object.keys(avatar).forEach(function (name) {
+                        // null means "drop this field", anything else is a value to set.
+                        if (avatar[name] === null) delete next[name];
+                        else next[name] = avatar[name];
+                    });
+                }
 
                 localStorage.setItem(key, buildLso(name, next));
                 localStorage.setItem(ACTIVE_ACCOUNT, pending);
@@ -653,6 +679,39 @@ window.popAccounts = function () {
         try {
             localStorage.removeItem(PENDING_LOGIN);
             localStorage.removeItem(PENDING_CHAR);
+        } catch (err) { }
+    };
+
+    /*
+       The character creator (flashpoint/createUser.swf) reinitialises the "Char"
+       save when it starts, which clears skin/hair/frame fields. "Change look" parks
+       the current appearance here first, and this puts it back on the next island
+       load unless the creator actually wrote real values of its own.
+    */
+    window.popRestoreLook = function () {
+        let saved = null;
+
+        try { saved = JSON.parse(localStorage.getItem(LOOK_BACKUP) || "null"); } catch (err) { }
+
+        if (!saved) return;
+
+        try {
+            const key = charStorageKey(), state = charState();
+
+            if (key && state) {
+                const missing = Object.keys(saved).filter(function (name) {
+                    return state[name] === undefined || state[name] === null;
+                });
+
+                // The backup is only consumed once it has actually been used, and it
+                // survives loads where the save was still intact - otherwise it would
+                // be deleted on the creator's own load, before that load wipes the save.
+                if (missing.length >= 6) {
+                    const name = key.slice(key.indexOf("//") + 2);
+                    localStorage.setItem(key, buildLso(name, Object.assign({}, state, saved)));
+                    localStorage.removeItem(LOOK_BACKUP);
+                }
+            }
         } catch (err) { }
     };
 
@@ -724,6 +783,7 @@ window.popAccounts = function () {
     }
 
     window.popBuildLso = buildLso;
+    window.popRefreshPanel = refresh;
 
     window.popSaveState = charState;
 
@@ -800,7 +860,14 @@ window.popAccounts = function () {
         return null;
     }
 
+    let refreshSeq = 0;
+
     async function refresh() {
+        // Reachable from main(): the panel is built before a queued character change is
+        // applied, so it has to re-read once that has happened. Two runs can overlap
+        // (the panel opening and main()'s refresh), so only the newest one draws the
+        // list - otherwise every account is appended twice.
+        const run = ++refreshSeq;
         let accounts;
 
         list.textContent = "";
@@ -831,6 +898,8 @@ window.popAccounts = function () {
             list.appendChild(emptyRow("Local accounts unavailable."));
             return;
         }
+
+        if (run !== refreshSeq) return;      // a newer refresh already owns the list
 
         if (!accounts.length) {
             list.appendChild(emptyRow("No accounts saved yet."));
@@ -869,6 +938,24 @@ window.popAccounts = function () {
         } catch (err) {
             setNote("Export failed: local accounts are unavailable.", true);
         }
+    });
+
+    /*
+       Reopens Poptropica's own character creator. The loader already has a route for
+       it: the "ready" cookie sends the next load through flashpoint/createUser.swf
+       instead of the island, which is exactly what a first run does. The cookie is
+       consumed on that load, so this cannot loop.
+    */
+    if (lookBtn) lookBtn.addEventListener("click", function () {
+        const key = charStorageKey(), state = charState();
+
+        try {
+            if (key) localStorage.setItem("pop.charBackup", localStorage.getItem(key) || "");
+            if (state) localStorage.setItem(LOOK_BACKUP, JSON.stringify(appearanceOf(state)));
+        } catch (err) { }
+
+        setCookieFlag(COOKIE_NEW_USER, true);
+        location.reload();
     });
 
     importBtn.addEventListener("click", function () { fileInput.click(); });
@@ -1005,6 +1092,92 @@ window.loadTrackingPixel = window.loadTrackingPixel || function () {};
 window.finalize = window.finalize || function () {};
 window.setAdStatus = window.setAdStatus || getAdStatus;
 window.setCharLazyLoadStatus = window.setCharLazyLoadStatus || getCharLazyLoadStatus;
+
+/*
+   Debug helper, off unless localStorage['pop.debugSO'] is "1". Ruffle keeps shared
+   objects in localStorage under "<host>//<name>", so wrapping storage shows exactly
+   which saves a run reads, writes and removes, in order. Entries go to sessionStorage
+   so they survive the reloads the game performs.
+*/
+(function instrumentSharedObjects() {
+    try {
+        if (localStorage.getItem("pop.debugSO") !== "1") return;
+    } catch (err) {
+        return;
+    }
+
+    const MAX = 300,
+          rawGet = Storage.prototype.getItem,
+          rawSet = Storage.prototype.setItem,
+          rawRemove = Storage.prototype.removeItem,
+          rawClear = Storage.prototype.clear;
+
+    function record(op, key, size, value) {
+        try {
+            const log = JSON.parse(sessionStorage.getItem("pop.solog") || "[]"),
+                  entry = { t: Date.now(), op: op, key: key, size: size };
+
+            // Keep the payload for character writes so two saves can be compared.
+            if (typeof value === "string" && key.indexOf("//Char") > -1) entry.v = value.slice(0, 6000);
+
+            log.push(entry);
+            while (log.length > MAX) log.shift();
+
+            sessionStorage.setItem("pop.solog", JSON.stringify(log));
+        } catch (err) { }
+    }
+
+    function watched(key) {
+        return typeof key === "string" && key.indexOf("//") > -1;
+    }
+
+    Storage.prototype.getItem = function (key) {
+        const value = rawGet.call(this, key);
+        if (this === localStorage && watched(key)) record("get", key, typeof value === "string" ? value.length : 0);
+        return value;
+    };
+
+    Storage.prototype.setItem = function (key, value) {
+        if (this === localStorage && watched(key)) record("set", key, typeof value === "string" ? value.length : 0, value);
+        return rawSet.call(this, key, value);
+    };
+
+    Storage.prototype.removeItem = function (key) {
+        if (this === localStorage && watched(key)) record("del", key, 0);
+        return rawRemove.call(this, key);
+    };
+
+    Storage.prototype.clear = function () {
+        if (this === localStorage) record("clear", "(all)", 0);
+        return rawClear.call(this);
+    };
+
+    window.popSOLog = function () {
+        try { return JSON.parse(sessionStorage.getItem("pop.solog") || "[]"); } catch (err) { return []; }
+    };
+
+    window.popSOLogClear = function () {
+        try { sessionStorage.removeItem("pop.solog"); } catch (err) { }
+    };
+})();
+
+/*
+   Fullscreen is the only way past the window-width ceiling: the stage already fits the
+   viewport, so with the same window there is nothing left to grow into.
+*/
+const fsBtn = document.getElementById("fsBtn");
+
+if (fsBtn) fsBtn.addEventListener("click", function () {
+    if (document.fullscreenElement) {
+        document.exitFullscreen();
+        return;
+    }
+
+    if (document.documentElement.requestFullscreen)
+        document.documentElement.requestFullscreen().catch(function () { });
+});
+
+document.addEventListener("fullscreenchange", fitStage);
 
 // The game starts last: the accounts panel above defines popApplyPendingLogin, and a
 // queued character rename must be written before Ruffle mounts and starts flushing.
