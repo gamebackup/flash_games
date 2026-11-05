@@ -1,80 +1,1014 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
+    <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Early Poptropica</title>
+    <link rel="icon" href="data:,">
     <script>window.RufflePlayer = window.RufflePlayer || {}; window.RufflePlayer.config = { quality: "low" };</script>
-
     <script src="../../ruffle/ruffle.js"></script>
     <style>
-        html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #139ffd; }
-        body { display: flex; align-items: center; justify-content: center; }
-        #game { width: 1010px; height: 673px; max-width: 100%; max-height: 100%; }
-        #game embed { display: block; }
+        body, embed, ruffle-player, ruffle-embed { background-color: #139ffd; }
+        body { margin: 0; width: 100vw; height: 100vh; overflow: hidden; }
+
+        #game, #game-menu { position: absolute; outline-width: 0; }
+        #stage { position: absolute; transform-origin: 0 0; }
+
+        #accountsBtn {
+            position: fixed; right: 10px; bottom: 10px; z-index: 10;
+            font: 12px/1.4 system-ui, sans-serif; padding: 5px 9px;
+            color: #fff; background: #0b6fd0; border: 1px solid #5fb4f5;
+            border-radius: 4px; cursor: pointer;
+        }
+        #accountsBtn:hover { background: #0a5aa8; }
+
+        #accountsPanel {
+            position: fixed; right: 10px; bottom: 46px; z-index: 11;
+            width: 240px; max-height: 50vh; overflow: auto;
+            font: 12px/1.5 system-ui, sans-serif; color: #fff;
+            background: #0a4f92; border: 1px solid #5fb4f5; border-radius: 6px;
+            padding: 10px 12px; box-shadow: 0 6px 24px rgba(0, 0, 0, .45);
+        }
+        #accountsPanel h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+        #accountsPanel h2 span { display: block; font-size: 11px; font-weight: 400; opacity: .75; }
+        #accountsList { list-style: none; margin: 0 0 8px; padding: 0; }
+        #accountsList li { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid rgba(255, 255, 255, .15); }
+        #accountsList b { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #accountsList i { font-style: normal; font-size: 11px; opacity: .75; }
+        .accountsActions { display: flex; gap: 6px; margin: 8px 0; }
+        #accountsNote { margin: 0 0 8px; font-size: 11px; color: #d6ecff; }
+        #accountsNote.bad { color: #ffd9a8; }
+        #accountsList button, #accountsClose, .accountsActions button {
+            font: inherit; color: #fff; background: #0b6fd0;
+            border: 1px solid #5fb4f5; border-radius: 3px; padding: 1px 6px; cursor: pointer;
+        }
+        #accountsList button:hover, #accountsClose:hover { background: #0a5aa8; }
+        #accountsEmpty { font-style: italic; opacity: .8; }
+        #accountsSave { margin: 0 0 8px; font-size: 11px; opacity: .8; }
+        #accountsChar {
+            margin: 8px 0 0; padding-top: 6px; font-size: 11px; line-height: 1.45;
+            max-height: 150px; overflow: auto; border-top: 1px solid rgba(255, 255, 255, .15);
+        }
+        #accountsChar div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+        #errorText {
+            position: absolute;
+            left: 0px;
+            top: calc(50vh + 322.5px);
+            width: 100vw;
+            color: white;
+            font-size: 1.6em;
+            font-family: "Billy Serif";
+            text-align: center;
+        }
+
+        @font-face {
+            font-family: "Billy Serif";
+            src: url(flashpoint/billySerif.ttf) format("truetype");
+        }
     </style>
 </head>
 <body>
-    <div id="game"></div>
+    <div id="errorText" hidden>Multiplayer features are unavailable.</div>
 
+    <button id="accountsBtn" type="button">Accounts</button>
+    <div id="accountsPanel" tabindex="-1" hidden>
+        <h2>Local accounts<span>saved in this browser only</span></h2>
+        <div id="accountsSave"></div>
+        <ul id="accountsList"></ul>
+        <div id="accountsChar"></div>
+        <div class="accountsActions">
+            <button id="accountsExport" type="button">Export</button>
+            <button id="accountsImport" type="button">Import</button>
+        </div>
+        <input id="accountsFile" type="file" accept="application/json,.json" hidden>
+        <div id="accountsNote"></div>
+        <button id="accountsClose" type="button">Close</button>
+    </div>
     <script>
+/*
+    Static port of the curation's base.php.
+
+    base.php is the server-side bootstrap for this Flashpoint gamezip: it reads the
+    request parameters, picks which start-up SWF to embed and at what size, and
+    exposes the handful of JS callbacks the SWFs call back into. The only parts that
+    need a server are the parameter transport and the .php endpoints; here the
+    parameters travel in the query string, and the SWF names that used to be PHP are
+    static pages (index.htm / home.htm / base.html / the base.php and index.php
+    directories all serve this same file).
+
+    Stages, in the order the client walks them:
+        saveData.swf   800x480  state=init                 Home screen + save toolbar
+        createUser.swf          state=return_user_standard first-run character creation
+        framework.swf  1010x645 state=return_user_standard the island client
+
+    Embeds are built by mountGame()/mountMenu() rather than by mutating one <embed>:
+    Ruffle polyfills embeds when they appear in the document, and an element whose
+    src is assigned later - without type="application/x-shockwave-flash" - is never
+    upgraded, which leaves a blank page.
+*/
+"use strict";
+
+const SCENE_FP_RESTART = "FlashpointIslandRestart",
+      SCENE_FP_START = "Home";
+
+const STATE_SCENE = 0,
+      STATE_FP_AD = 1,
+      STATE_FP_RESTART = 2,
+      STATE_FP_START = 3,
+      STATE_FP_CREATE = 4;
+
+// Relative, not root-absolute: this mirror is served from a subdirectory.
+const SWF_STATES = [ "framework.swf", "flashpoint/adSkip.swf", "flashpoint/restartIsland.swf",
+                     "flashpoint/saveData.swf", "flashpoint/createUser.swf" ];
+
+const COOKIE_ADS = "ads",
+      COOKIE_CHARS = "charLazyLoad",
+      COOKIE_NEW_USER = "ready";
+
+const PATH_DEFAULT = "gameplay";
+const PAGE_BASE = "base.html"; // this page under the name the SWFs navigate to.
+
+const errorText = document.getElementById("errorText"),
+      lsKey = "lastScene";
+
+// Local accounts: sw.js answers login.php / part-register.php / register.php from
+// this browser's IndexedDB, so accounts work on a static host. Scoped to this
+// folder, so it never touches anything else on the origin.
+if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("sw.js", { scope: "./" }).then(function (reg) {
+        console.log("[pop] local account backend ready for", reg.scope);
+    }, function (err) {
+        console.warn("[pop] local account backend unavailable:", err && err.message);
+    });
+}
+
+let game = null,       // the main stage embed
+    menu = null;       // the 58px save-data toolbar that Home shows
+
+const stage = document.createElement("div");
+stage.id = "stage";
+document.body.appendChild(stage);
+
+const stageSize = { w: 0, h: 0, menu: 0 }; // natural size of the current stage
+
+function main() {
+    // A rename asked for in the accounts panel is applied here, before Ruffle starts.
+    // Writing it while the SWF is alive does not stick, because the player flushes its
+    // own copy of every shared object over the top when the page unloads.
+    if (typeof window.popApplyPendingLogin === "function") window.popApplyPendingLogin();
+
+    const params = getInput();
+
+    // First run: no character save exists, so route through createUser.swf the way the
+    // curation's menu does when "new user" is pressed (it sets "ready" and reloads).
+    // The flag is only consulted for non-Home scenes, so the reload has to name a
+    // concrete scene; otherwise the client boots into the island with no user and
+    // raises "game data has been lost" on top of Home, which is what makes that
+    // dialog's "back to home page" button look like a plain refresh.
+    if (!params.roomWasSet && !hasCharacter()) {
+        setCookieFlag(COOKIE_NEW_USER, true);
+        location.replace(PAGE_BASE + "?island=Early&room=City2&startup_path=" + PATH_DEFAULT);
+        return;
+    }
+
+    flashpointLoad(params.island, params.room, params.startup_path);
+}
+
+function makeEmbed(id, src, width, height, flashvars) {
+    const el = document.createElement("embed");
+    el.id = id;
+    el.setAttribute("src", src);
+    el.setAttribute("type", "application/x-shockwave-flash");
+    el.setAttribute("width", width);
+    el.setAttribute("height", height);
+    el.setAttribute("scale", "noscale");
+    el.setAttribute("wmode", "opaque");
+    el.setAttribute("menu", "false");
+    el.setAttribute("bgcolor", "139ffd");
+    if (flashvars) el.setAttribute("flashvars", flashvars);
+    // Positioned by the #stage wrapper, which scales the whole thing to fit.
+    el.style.left = "0px";
+    el.style.top = "0px";
+    return el;
+}
+
+function mountGame(src, width, height, flashvars) {
+    const fresh = makeEmbed("game", src, width, height, flashvars);
+    if (game && game.isConnected) game.replaceWith(fresh);
+    else stage.appendChild(fresh);
+    game = fresh;
+    stageSize.w = width;
+    stageSize.h = height;
+    fitStage();
+}
+
+function mountMenu(src, width, height, flashvars) {
+    const fresh = makeEmbed("game-menu", src, width, height, flashvars);
+    fresh.style.top = `${ stageSize.h }px`;  // sits directly under the stage
+    if (menu && menu.isConnected) menu.replaceWith(fresh);
+    else stage.appendChild(fresh);
+    menu = fresh;
+    stageSize.menu = height;
+    fitStage();
+}
+
+/*
+    A 1010x645 island stage does not fit a narrow window, and a cropped stage puts the
+    right-hand HUD out of reach. Scale the stage (and the toolbar under it) down until
+    it fits, keeping the aspect ratio. Ruffle maps pointer coordinates through
+    getBoundingClientRect, so clicks still land correctly under the transform.
+*/
+function fitStage() {
+    if (!stageSize.w || !stageSize.h) return;
+
+    const pad = 8,
+          withMenu = menu && menu.isConnected ? stageSize.menu : 0,
+          w = stageSize.w,
+          h = stageSize.h + withMenu;
+
+    const k = Math.min(1, (innerWidth - pad) / w, (innerHeight - pad) / h);
+
+    stage.style.transform = `scale(${ k })`;
+    stage.style.left = `${ Math.max(0, (innerWidth - w * k) / 2) }px`;
+    stage.style.top = `${ Math.max(0, (innerHeight - h * k) / 2) }px`;
+}
+
+window.addEventListener("resize", fitStage);
+
+function flashpointLoad(island, scene, path = PATH_DEFAULT) {
+    let adScene = false,
+        pageState;
+
+    switch (scene) {
+        case SCENE_FP_RESTART:
+            pageState = STATE_FP_RESTART;
+            break;
+        case SCENE_FP_START:
+            pageState = STATE_FP_START;
+            break;
+        default:
+            if (scene.startsWith("Ad")) {
+                if (getAdStatus()) {
+                    pageState = STATE_SCENE;
+                    adScene = true;
+                } else {
+                    pageState = STATE_FP_AD;
+                }
+            } else if (getCookieFlag(COOKIE_NEW_USER, false)) {
+                pageState = STATE_FP_CREATE;
+                setCookieFlag(COOKIE_NEW_USER, false);
+            } else {
+                pageState = STATE_SCENE;
+
+                // Mostly detects "{island}Common" scenes, but also Early Poptropica's
+                // "Common" scene and Red Dragon Island's "LibraryCommon" scene.
+                if (!scene.endsWith("Common")) {
+                    const SPECIAL_COMMONS = [ "Coconut", "Party", "Cinema", "News", "HairClub", "Airlines",
+                                              "Saltys", "Crop", "BaguetteInn", "Billiards", "MidasGym",
+                                              "BrokenBarrel", "HotelInterior", "ClubInterior" ];
+
+                    // Wimpy Boardwalk Island has a normal scene named "Arcade".
+                    if (!(SPECIAL_COMMONS.includes(scene) || scene === "Arcade" && island === "Early")) {
+                        break;
+                    }
+                }
+
+                errorText.hidden = false;
+            }
+
+            break;
+    }
+
+    let width, height, gameState;
+
+    if (adScene) {
+        gameState = "return_user_advertisement_1";
+        width = 776;
+        height = 480;
+    } else if (scene === SCENE_FP_START) {
+        gameState = "init";
+        width = 800;
+        height = 480;
+    } else {
+        gameState = "return_user_standard";
+        width = 1010;
+        height = 645;
+    }
+
+    const flashVars = new URLSearchParams();
+    flashVars.set("desc", scene);
+    flashVars.set("island", island);
+    flashVars.set("startup_path", path);
+    flashVars.set("state", gameState);
+
+    if (getCharLazyLoadStatus())
+        flashVars.set("charLazyLoad", "1");
+
+    if (pageState === STATE_FP_START)
+        loadFPStart(SWF_STATES[pageState], width, height, flashVars.toString());
+    else {
+        if (pageState === STATE_SCENE)
+            sceneChange(island, scene);
+
+        mountGame(SWF_STATES[pageState], width, height, flashVars.toString());
+    }
+}
+
+function flashpointError(recoverable) {
+    if (recoverable)
+        location.reload();
+    else {
+        alert("A fatal error occurred.");
+        location.href = "index.html";
+    }
+}
+
+function getAdStatus() {
+    return getCookieFlag(COOKIE_ADS, false);
+}
+
+function getCharLazyLoadStatus() {
+    return getCookieFlag(COOKIE_CHARS, false);
+}
+
+function loadFPStart(extraMenuSrc, width, height, flashvars) {
+    mountMenu(extraMenuSrc, width, 58, flashvars);
+
+    window.flashpointLoad = function () {
+        mountGame(SWF_STATES[STATE_SCENE], width, height, flashvars);
+        menu.style.top = `${ height }px`;
+        menu.removeAttribute("hidden");
+        fitStage();
+    };
+
+    window.setInteractivity = function (enabled) {
+        menu.style.opacity = game ? game.style.opacity : null;
+        menu.style.opacity = game ? game.style.opacity = enabled ? null : 0.6 : null;
+        menu.style.pointerEvents = enabled ? null : "none";
+        if (game) game.style.pointerEvents = enabled ? null : "none";
+    };
+
+    window.loadTrackingPixel = function () {
+        setInteractivity(false);
+        // The toolbar is an AS3 shim; this asks it to start a brand new character.
+        if (menu) menu.newUser();
+    };
+
+    window.newUserAccept = function () {
+        setCookieFlag(COOKIE_NEW_USER, true);
+        finalize();
+    };
+
+    window.returnUser = function () {
+        // base.php detaches the stage here and lets the toolbar restore the save.
+        if (game && game.isConnected) game.remove();
+        setTimeout(function () { if (menu) menu.returnUser(); }, 1);
+    };
+
+    window.returnUserAccept = function () {
+        let island = "Early",
+            scene = "City2";
+        const lastScene = getLastScene();
+
+        if (lastScene) {
+            island = lastScene.island;
+            scene = lastScene.scene;
+        }
+
+        finalize();
+        POSTToBase(scene, island, PATH_DEFAULT);
+    };
+
+    window.newUserReject = window.returnUserReject = function () {
+        location.reload();
+    };
+
+    window.setAdStatus = function (enabled) {
+        return setCookieFlag(COOKIE_ADS, enabled);
+    };
+
+    window.setCharLazyLoadStatus = function (enabled) {
+        return setCookieFlag(COOKIE_CHARS, enabled);
+    };
+
+    window.finalize = function () {
+        setInteractivity(true);
+        if (menu && menu.isConnected) menu.remove();
+        menu = null;
+    };
+}
+
+// Utilities
+
+function getInput() {
+    const q = new URLSearchParams(location.search);
+    const obj = {};
+
+    obj.room = q.get("room");
+    obj.island = q.get("island");
+    obj.startup_path = q.get("startup_path");
+    obj.roomWasSet = !!obj.room;
+
+    if (typeof obj.room !== "string" || !obj.room)
+        obj.room = SCENE_FP_START;
+
+    if (typeof obj.island !== "string" || !obj.island)
+        obj.island = "Home";
+
+    if (typeof obj.startup_path !== "string" || !obj.startup_path)
+        obj.startup_path = PATH_DEFAULT;
+
+    return obj;
+}
+
+function hasCharacter() { // Ruffle stores SharedObjects in localStorage as "<host>//<name>"
+    try {
+        return Object.keys(localStorage).some(function (key) { return key.endsWith("//Char"); });
+    } catch (err) {
+        return true; // Don't force character creation if storage cannot be read.
+    }
+}
+
+function sceneChange(island, scene) {
+    try {
+        localStorage.setItem(lsKey, JSON.stringify({ island, scene }));
+    } catch (err) { }
+}
+
+function getLastScene() {
+    try {
+        const data = JSON.parse(localStorage.getItem(lsKey));
+
+        if (typeof data === "object" && data !== null && typeof data.island === "string" && typeof data.scene === "string")
+            return data;
+    } catch (err) { }
+
+    return null;
+}
+
+function getCookieFlag(name, defaultValue) { // Returns true if flag is ENABLED
+    const res = new RegExp(`(^|;)\\s*${ name }=(.)`, "").exec(document.cookie);
+    return res ? res[2] !== "0" : defaultValue;
+}
+
+function setCookieFlag(name, enabled) {
+    document.cookie = `${ name }=${ enabled ? "1" : "0" };expires=${ new Date(Date.now() + 315576000000) };path=/`;
+}
+
+// Game functions
+
+function dbug(message) {
+    console.log(message);
+}
+
+/*
+    base.php submits a form here; a static host cannot answer a POST, so the same
+    three arguments travel as a query string instead.
+*/
+function POSTToBase(room, island, startup_path) {
+    const params = new URLSearchParams();
+    params.set("room", room);
+    params.set("island", island);
+    params.set("startup_path", startup_path);
+    location.href = PAGE_BASE + "?" + params.toString();
+}
+
+// Debug helper: list what this browser has saved for the local accounts.
+window.popAccounts = function () {
+    return fetch("__pop_accounts.php").then(function (r) { return r.json(); });
+};
+
+/* On-page manager for the accounts sw.js keeps in IndexedDB, so they can be
+   inspected and removed without opening devtools. */
+(function () {
+    const btn = document.getElementById("accountsBtn"),
+          panel = document.getElementById("accountsPanel"),
+          list = document.getElementById("accountsList"),
+          save = document.getElementById("accountsSave"),
+          charBox = document.getElementById("accountsChar"),
+          exportBtn = document.getElementById("accountsExport"),
+          importBtn = document.getElementById("accountsImport"),
+          fileInput = document.getElementById("accountsFile"),
+          note = document.getElementById("accountsNote"),
+          close = document.getElementById("accountsClose");
+
+    if (!btn || !panel || !list || !save || !charBox || !exportBtn || !importBtn || !fileInput || !note || !close) return;
+
+    function setNote(text, bad) {
+        note.textContent = text || "";
+        note.classList.toggle("bad", !!bad);
+    }
+
     /*
-        Static stand-in for the curation's base.php.
-
-        base.php is only a bootstrap: it reads the request parameters, decides
-        which of the patched start-up SWFs to load, and exposes a handful of JS
-        callbacks the SWFs call back into. The new-player path is the part that
-        matters here — without it the client finds no character save and stalls on
-        its "user data lost" recovery screen, which is what happens if you load
-        framework.swf directly.
-
-        Flow reproduced from base.php:
-          createUser.swf  -> creates the character save, then calls flashpointLoad()
-          framework.swf   -> the actual client, which loads scenes/islandEarly/*
+       Reads one shared object written by Ruffle: 2 byte magic, total length, "TCSO",
+       a version u16 and a zero u32, a u32 name length, the name, a u32 pad, then
+       u16-length keys with AMF0 values (a zero pad byte follows each value). Proved
+       byte-identical by re-serialising the stored "Char" object unchanged.
     */
-    (function () {
-        var params = new URLSearchParams(location.search);
-        var island = params.get('island') || 'Early';
-        var scene  = params.get('scene')  || 'City2';
-        var holder = document.getElementById('game');
+    function parseLso(b64) {
+        const bin = atob(b64 || ""), n = bin.length;
+        const u8 = i => bin.charCodeAt(i);
+        const u16 = i => (u8(i) << 8) | u8(i + 1);
+        const u32 = i => ((u8(i) << 24) | (u8(i + 1) << 16) | (u8(i + 2) << 8) | u8(i + 3)) >>> 0;
+        const out = {};
 
-        function embed(src, flashvars) {
-            holder.innerHTML = '';
-            var el = document.createElement('embed');
-            el.setAttribute('src', src);
-            el.setAttribute('type', 'application/x-shockwave-flash');
-            el.setAttribute('width', '100%');
-            el.setAttribute('height', '100%');
-            el.setAttribute('scale', 'noscale');
-            el.setAttribute('wmode', 'opaque');
-            el.setAttribute('menu', 'false');
-            el.setAttribute('bgcolor', '#139ffd');
-            el.setAttribute('flashvars', flashvars);
-            holder.appendChild(el);
+        let off = 14;
+        const nameLen = u32(off); off += 4 + nameLen + 4;
+
+        while (off + 2 < n) {
+            const kl = u16(off); off += 2;
+            const key = bin.substr(off, kl); off += kl;
+            const t = u8(off);
+
+            if (t === 0) {
+                const bytes = new Uint8Array(8);
+                for (let i = 0; i < 8; i++) bytes[i] = u8(off + 1 + i);
+                out[key] = new DataView(bytes.buffer).getFloat64(0);
+                off += 9;
+            } else if (t === 1) {
+                out[key] = u8(off + 1) !== 0;
+                off += 2;
+            } else if (t === 2) {
+                const len = u16(off + 1);
+                out[key] = bin.substr(off + 3, len);
+                off += 3 + len;
+            } else if (t === 5) {
+                out[key] = null; off += 1;
+            } else if (t === 6) {
+                out[key] = undefined; off += 1;
+            } else {
+                break;                      // unknown type: stop rather than guess
+            }
+
+            off += 1;                       // pad byte after every value
         }
 
-        function gameVars(desc, isl) {
-            return 'desc=' + encodeURIComponent(desc) +
-                   '&island=' + encodeURIComponent(isl) +
-                   '&startup_path=gameplay&state=return_user_standard';
+        return out;
+    }
+
+    function charStorageKey() {
+        try {
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key && key.endsWith("//Char")) return key;
+            }
+        } catch (err) { }
+
+        return null;
+    }
+
+    function charState() {
+        const key = charStorageKey();
+        if (!key) return null;
+
+        try {
+            return parseLso(localStorage.getItem(key));
+        } catch (err) {
+            return null;
+        }
+    }
+
+    /*
+       Writes a shared object back out in the same format parseLso reads. Proved by
+       re-serialising the stored "Char" object: the result is byte-identical to what
+       Ruffle wrote (551 bytes), so only the fields we deliberately change differ.
+    */
+    function buildLso(name, obj) {
+        const out = [0x00, 0xbf, 0, 0, 0, 0];
+        const w8 = function (v) { out.push(v & 0xff); };
+        const w16 = function (v) { w8(v >> 8); w8(v); };
+        const w32 = function (v) { w8(v >>> 24); w8(v >>> 16); w8(v >>> 8); w8(v); };
+        const wStr = function (s) { for (let i = 0; i < s.length; i++) w8(s.charCodeAt(i)); };
+        const wDouble = function (v) {
+            const bytes = new Uint8Array(8);
+            new DataView(bytes.buffer).setFloat64(0, v);
+            for (let i = 0; i < 8; i++) w8(bytes[i]);
+        };
+
+        "TCSO".split("").forEach(function (ch) { w8(ch.charCodeAt(0)); });
+        w16(4);                              // version, as Ruffle writes it
+        w16(0);
+        w32(name.length); wStr(name); w32(0);
+
+        Object.keys(obj).forEach(function (key) {
+            const value = obj[key];
+
+            w16(key.length); wStr(key);
+
+            if (typeof value === "number") { w8(0); wDouble(value); }
+            else if (typeof value === "boolean") { w8(1); w8(value ? 1 : 0); }
+            else if (typeof value === "string") { w8(2); w16(value.length); wStr(value); }
+            else { w8(6); }                  // undefined
+
+            w8(0);                           // pad byte after every value
+        });
+
+        const total = out.length - 6;
+        out[2] = (total >>> 24) & 0xff;
+        out[3] = (total >>> 16) & 0xff;
+        out[4] = (total >>> 8) & 0xff;
+        out[5] = total & 0xff;
+
+        let bin = "";
+        for (let i = 0; i < out.length; i++) bin += String.fromCharCode(out[i] & 0xff);
+
+        return btoa(bin);
+    }
+
+    const PENDING_LOGIN = "pop.pendingLogin",
+          PENDING_CHAR = "pop.pendingChar",
+          ACTIVE_ACCOUNT = "pop.activeAccount";
+
+    /*
+       Applied on the next load from main(), before the game mounts: swaps only the
+       login name inside the character save that already boots, leaving every other
+       field exactly as the game wrote it. Nothing is written from the panel itself,
+       because Ruffle would overwrite it on unload.
+    */
+    window.popApplyPendingLogin = function () {
+        let pending = null, avatar = null;
+
+        try {
+            pending = localStorage.getItem(PENDING_LOGIN);
+            avatar = JSON.parse(localStorage.getItem(PENDING_CHAR) || "null");
+        } catch (err) { }
+
+        if (!pending) return;
+
+        try {
+            const key = charStorageKey(), state = charState();
+
+            if (key && state) {
+                const name = key.slice(key.indexOf("//") + 2),
+                      next = Object.assign({}, state, { login: pending });
+
+                if (avatar && typeof avatar === "object") Object.assign(next, avatar);
+
+                localStorage.setItem(key, buildLso(name, next));
+                localStorage.setItem(ACTIVE_ACCOUNT, pending);
+            }
+        } catch (err) { }
+
+        try {
+            localStorage.removeItem(PENDING_LOGIN);
+            localStorage.removeItem(PENDING_CHAR);
+        } catch (err) { }
+    };
+
+    /*
+       "Play as": queues the rename and reloads, so the island boots with the chosen
+       account's name. The previous save is kept under pop.charBackup first.
+    */
+    /* The parts of the character save that make up the avatar on screen. */
+    const APPEARANCE = ["skinColor", "lineColor", "hairColor", "eyelidsPos", "eyesFrame",
+                        "pantsFrame", "lineWidth", "shirtFrame", "hairFrame", "mouthFrame",
+                        "marksFrame", "itemFrame", "packFrame", "facialFrame",
+                        "overshirtFrame", "overpantsFrame", "gender",
+                        "specialAbility", "specialAbilityParams"];
+
+    function appearanceOf(state) {
+        const out = {};
+
+        APPEARANCE.forEach(function (name) {
+            if (state && Object.prototype.hasOwnProperty.call(state, name)) out[name] = state[name];
+        });
+
+        return out;
+    }
+
+    function activeAccount() {
+        try { return localStorage.getItem(ACTIVE_ACCOUNT) || ""; } catch (err) { return ""; }
+    }
+
+    function rememberChar(username, avatar) {
+        return fetch("__pop_set_char.php", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: username, char: avatar })
+        }).catch(function () { });
+    }
+
+    async function playAs(account) {
+        const key = charStorageKey(), state = charState();
+
+        if (!key || !state) {
+            setNote("No saved character to copy yet - start the game once, then try again.", true);
+            return;
         }
 
-        // The slice of base.php's API that the start-up SWFs call into.
-        window.flashpointLoad = function () {
-            embed('./framework.swf', gameVars(scene, island));
-        };
-        window.flashpointError = function (recoverable) {
-            console.error('flashpointError (recoverable=' + recoverable + ')');
-        };
-        window.dbug = function (message) { console.log(message); };
-        window.setAdStatus = function () { return true; };
-        window.setCharLazyLoadStatus = function () { return false; };
-        window.loadTrackingPixel = function () {};
-        window.finalize = function () {};
-        window.returnUser = window.newUserAccept = window.returnUserAccept = window.flashpointLoad;
+        const playing = activeAccount(),
+              onScreen = appearanceOf(state),
+              own = account.char && Object.keys(account.char).length ? account.char : null;
 
-        embed('./flashpoint/createUser.swf', gameVars(scene, island));
-    })();
+        // Park the avatar that is on screen on the account that owns it, so switching
+        // accounts does not lose the character that was just being played.
+        if (playing && playing !== account.username) await rememberChar(playing, onScreen);
+
+        // An account with a character of its own gets it back; a new one adopts the
+        // avatar on screen and keeps it from then on.
+        const avatar = own || onScreen;
+        if (!own) await rememberChar(account.username, onScreen);
+
+        try {
+            localStorage.setItem("pop.charBackup", localStorage.getItem(key));
+            localStorage.setItem(PENDING_LOGIN, account.username);
+            localStorage.setItem(PENDING_CHAR, JSON.stringify(avatar));
+        } catch (err) {
+            setNote("Could not queue the character rename.", true);
+            return;
+        }
+
+        setNote("Loading the island as " + account.username + "...");
+        location.reload();
+    }
+
+    window.popBuildLso = buildLso;
+
+    window.popSaveState = charState;
+
+    function emptyRow(text) {
+        const li = document.createElement("li");
+        li.id = "accountsEmpty";
+        li.textContent = text;
+        return li;
+    }
+
+    function accountRow(account) {
+        const li = document.createElement("li"),
+              name = document.createElement("b"),
+              info = document.createElement("i"),
+              play = document.createElement("button"),
+              del = document.createElement("button");
+
+        name.textContent = account.username +
+                           (activeAccount() === account.username ? " \u00b7 playing" : "");
+        info.textContent = (account.credits || "0") + "c";
+
+        play.type = "button";
+        play.textContent = "play";
+        play.title = "Load the island as " + account.username + " (rewrites the saved character name)";
+        play.addEventListener("click", function () {
+            play.disabled = true;
+            playAs(account);
+        });
+
+        del.type = "button";
+        del.textContent = "delete";
+        del.title = "Delete " + account.username + " from this browser";
+        del.addEventListener("click", async function () {
+            del.disabled = true;
+            try {
+                await fetch("__pop_delete_account.php", {
+                    method: "POST",
+                    body: new URLSearchParams({ username: account.username }).toString()
+                });
+            } catch (err) { }
+            await refresh();
+        });
+
+        li.append(name, info, play, del);
+        return li;
+    }
+
+    /*
+       The Flashpoint save shim keeps the logged-in name in its own shared object
+       ("FlashpointBackup"), stored as base64 AMF. Read just that one string out of it
+       so the panel can show which name the saved game is carrying - no rewriting.
+    */
+    function savedLoginName() {
+        try {
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (!key || !key.endsWith("//FlashpointBackup")) continue;
+
+                const bin = atob(localStorage.getItem(key) || "");
+
+                // This dialect encodes lengths as (length << 1) | 1, and string
+                // values as 0x06 followed by that length byte, so the "login" key
+                // reads as 00 0b "login" 06 19 "GUEST4630169" (0x19 = 12 chars).
+                const at = bin.indexOf(String.fromCharCode(0, (5 << 1) | 1) + "login");
+                if (at < 0) continue;
+
+                const size = bin.charCodeAt(at + 8),
+                      len = (size - 1) >> 1;
+
+                return bin.substr(at + 9, len);
+            }
+        } catch (err) { }
+
+        return null;
+    }
+
+    async function refresh() {
+        let accounts;
+
+        list.textContent = "";
+
+        const state = charState();
+
+        // The character save is what the game boots with. The shim keeps its own copy
+        // of the name (savedLoginName), which lags behind once the panel renames the
+        // character, so it is only a fallback here.
+        save.textContent = "Saved game login: " + ((state && state.login) || savedLoginName() || "none");
+        charBox.textContent = "";
+
+        if (state && Object.keys(state).length) {
+            Object.keys(state).forEach(function (name) {
+                const value = state[name],
+                      row = document.createElement("div");
+
+                row.textContent = name + ": " + (value === undefined ? "—" : String(value));
+                charBox.appendChild(row);
+            });
+        } else {
+            charBox.textContent = "No character save yet.";
+        }
+
+        try {
+            accounts = (await (await fetch("__pop_accounts.php")).json()).accounts || [];
+        } catch (err) {
+            list.appendChild(emptyRow("Local accounts unavailable."));
+            return;
+        }
+
+        if (!accounts.length) {
+            list.appendChild(emptyRow("No accounts saved yet."));
+            return;
+        }
+
+        accounts.forEach(function (account) { list.appendChild(accountRow(account)); });
+    }
+
+    /*
+       Back the accounts up to a file, and restore them in another browser. The file
+       is exactly what __pop_accounts.php serves; import merges and leaves any account
+       that already exists here untouched.
+    */
+    async function exportAccounts() {
+        const data = await (await fetch("__pop_accounts.php")).json();
+
+        return JSON.stringify({ saved: new Date().toISOString(), accounts: data.accounts || [] }, null, 2);
+    }
+
+    window.popExportAccounts = exportAccounts;
+
+    exportBtn.addEventListener("click", async function () {
+        try {
+            const text = await exportAccounts(),
+                  blob = new Blob([text], { type: "application/json" }),
+                  url = URL.createObjectURL(blob),
+                  link = document.createElement("a");
+
+            link.href = url;
+            link.download = "poptropica-accounts.json";
+            link.click();
+            setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+
+            setNote("Export prepared: " + JSON.parse(text).accounts.length + " account(s).");
+        } catch (err) {
+            setNote("Export failed: local accounts are unavailable.", true);
+        }
+    });
+
+    importBtn.addEventListener("click", function () { fileInput.click(); });
+
+    fileInput.addEventListener("change", async function () {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+
+        let text = "", parsed = null;
+
+        try {
+            text = await file.text();
+        } catch (err) {
+            setNote("Import failed: could not read that file.", true);
+            fileInput.value = "";
+            return;
+        }
+
+        try {
+            parsed = JSON.parse(text);
+        } catch (err) {
+            setNote("Import failed: that file is not valid JSON.", true);
+            fileInput.value = "";
+            await refresh();
+            return;
+        }
+
+        const list = Array.isArray(parsed) ? parsed : (parsed && parsed.accounts) || [];
+
+        if (!list.length) {
+            setNote("Import failed: no accounts in that file.", true);
+            fileInput.value = "";
+            await refresh();
+            return;
+        }
+
+        try {
+            const result = await (await fetch("__pop_import_accounts.php", {
+                method: "POST",
+                body: text
+            })).json();
+
+            await refresh();
+
+            if (result.imported)
+                setNote("Imported " + result.imported + " account(s)" +
+                        (result.skipped ? ", skipped " + result.skipped + " already saved here." : "."));
+            else
+                setNote("Nothing new: all " + result.skipped + " account(s) are already saved here.");
+        } catch (err) {
+            setNote("Import failed: local accounts are unavailable.", true);
+        }
+
+        fileInput.value = "";
+    });
+
+    /*
+       The panel remembers whether it was open, and re-reads its list whenever the tab
+       is looked at again - the game can write saves while the panel sits open.
+    */
+    const PANEL_KEY = "pop.accountsPanel";
+
+    /* Keep keyboard input where it belongs: the panel takes focus while it is open,
+       and the game gets focus back (plus a pointer nudge) when it closes. */
+    function focusGame() {
+        const game = document.getElementById("game");
+
+        if (game && typeof game.focus === "function") {
+            try { game.focus(); } catch (err) { }
+        }
+    }
+
+    function setOpen(open) {
+        panel.hidden = !open;
+
+        try { localStorage.setItem(PANEL_KEY, open ? "1" : "0"); } catch (err) { }
+
+        if (open) {
+            setNote("");
+            refresh();
+            try { panel.focus(); } catch (err) { }
+        } else {
+            focusGame();
+        }
+    }
+
+    /* Alt+A toggles the panel; Escape closes it. Both stop here so the game never
+       sees them, and the shortcut is Alt-based so ordinary typing still reaches Flash. */
+    window.addEventListener("keydown", function (event) {
+        const altA = event.altKey && !event.ctrlKey && !event.metaKey &&
+                     (event.key === "a" || event.key === "A" || event.code === "KeyA");
+
+        if (altA) {
+            event.preventDefault();
+            event.stopPropagation();
+            setOpen(panel.hidden);
+            return;
+        }
+
+        if (event.key === "Escape" && !panel.hidden) {
+            event.preventDefault();
+            event.stopPropagation();
+            setOpen(false);
+        }
+    });
+
+    btn.addEventListener("click", function () { setOpen(panel.hidden); });
+
+    close.addEventListener("click", function () { setOpen(false); });
+
+    document.addEventListener("visibilitychange", function () {
+        if (!document.hidden && !panel.hidden) refresh();
+    });
+
+    window.addEventListener("focus", function () {
+        if (!panel.hidden) refresh();
+    });
+
+    try {
+        if (localStorage.getItem(PANEL_KEY) === "1") setOpen(true);
+    } catch (err) { }
+})();
+
+window.dbug = dbug;
+// The AS3 shims probe for this; without it they take their "is flashpointReady
+// defined?" error path even though nothing is actually wrong.
+window.flashpointReady = window.flashpointReady || function (message) {
+    if (message) console.log(message);
+};
+window.flashpointLoad = window.flashpointLoad || flashpointLoad;
+window.flashpointError = flashpointError;
+window.setInteractivity = window.setInteractivity || function () {};
+window.loadTrackingPixel = window.loadTrackingPixel || function () {};
+window.finalize = window.finalize || function () {};
+window.setAdStatus = window.setAdStatus || getAdStatus;
+window.setCharLazyLoadStatus = window.setCharLazyLoadStatus || getCharLazyLoadStatus;
+
+// The game starts last: the accounts panel above defines popApplyPendingLogin, and a
+// queued character rename must be written before Ruffle mounts and starts flushing.
+main();
     </script>
 </body>
 </html>
