@@ -80,7 +80,7 @@
     <div id="errorText" hidden>Multiplayer features are unavailable.</div>
 
     <button id="accountsBtn" type="button">Accounts</button>
-    <button id="fsBtn" type="button">Bigger</button>
+    <button id="fsBtn" type="button">Fullscreen</button>
     <div id="accountsPanel" tabindex="-1" hidden>
         <h2>Local accounts<span>saved in this browser only</span></h2>
         <div id="accountsSave"></div>
@@ -168,6 +168,7 @@ function main() {
     // own copy of every shared object over the top when the page unloads.
     if (typeof window.popApplyPendingLogin === "function") window.popApplyPendingLogin();
     if (typeof window.popRestoreLook === "function") window.popRestoreLook();
+    if (typeof window.popEnsureLook === "function") window.popEnsureLook();
 
     // Those rewrote the character save after the panel first drew it.
     if (typeof window.popRefreshPanel === "function") window.popRefreshPanel();
@@ -180,9 +181,18 @@ function main() {
     // concrete scene; otherwise the client boots into the island with no user and
     // raises "game data has been lost" on top of Home, which is what makes that
     // dialog's "back to home page" button look like a plain refresh.
-    if (!params.roomWasSet && !hasCharacter()) {
+    // Reusing the island that was asked for keeps a deep link (e.g. the travel map's
+    // "home.htm?island=Villain") pointing at that island instead of forcing Early.
+    // The "fresh" marker makes the redirect single-shot: without it a profile with no
+    // character reloads into this branch forever and never reaches createUser.swf.
+    if (!hasCharacter() && params.fresh !== "1") {
         setCookieFlag(COOKIE_NEW_USER, true);
-        location.replace(PAGE_BASE + "?island=Early&room=City2&startup_path=" + PATH_DEFAULT);
+
+        const freshIsland = params.island === "Home" ? "Early" : params.island,
+              freshRoom = params.island === "Home" ? "City2" : params.room;
+
+        location.replace(PAGE_BASE + "?island=" + encodeURIComponent(freshIsland) +
+            "&room=" + encodeURIComponent(freshRoom) + "&startup_path=" + PATH_DEFAULT + "&fresh=1");
         return;
     }
 
@@ -427,9 +437,18 @@ function getInput() {
     obj.island = q.get("island");
     obj.startup_path = q.get("startup_path");
     obj.roomWasSet = !!obj.room;
+    obj.fresh = q.get("fresh");
 
+    const islandGiven = typeof obj.island === "string" && !!obj.island;
+
+    /*
+        The travel map links to an island as "home.htm?island=Villain" with no room.
+        Every island's entry scene is named "<Island>Main" (VillainMain, SuperMain,
+        AstroMain...), so an empty room used to collapse to "Home" and drop the player
+        straight back on the menu. Only derive a room when an island was actually named.
+    */
     if (typeof obj.room !== "string" || !obj.room)
-        obj.room = SCENE_FP_START;
+        obj.room = islandGiven && obj.island !== "Home" ? obj.island + "Main" : SCENE_FP_START;
 
     if (typeof obj.island !== "string" || !obj.island)
         obj.island = "Home";
@@ -679,6 +698,51 @@ window.popAccounts = function () {
         try {
             localStorage.removeItem(PENDING_LOGIN);
             localStorage.removeItem(PENDING_CHAR);
+        } catch (err) { }
+    };
+
+    /*
+       A brand-new browser profile has no account, so the client's creator writes a
+       placeholder character: every frame field is the numeric 1 and shirtFrame /
+       pantsFrame are numbers instead of part names. The client reads that save as
+       "user data lost" and covers the island with popups/lostlook.swf, which is the
+       "SORRY, BUT ... HAS BEEN LOST" card. Replace just such a save with the canonical
+       default look before Ruffle mounts; a save with real part names is left alone.
+    */
+    const DEFAULT_LOOK = {
+        skinColor: 14193168,
+        lineColor: 11301900,
+        hairColor: 14193168,
+        eyelidsPos: 79,
+        eyesFrame: 2,
+        pantsFrame: "Sears6",
+        lineWidth: 4,
+        shirtFrame: "boyShirt1",
+        hairFrame: 9,
+        mouthFrame: 14,
+        marksFrame: 1,
+        itemFrame: 1,
+        packFrame: 1,
+        facialFrame: 1,
+        overshirtFrame: 1,
+        overpantsFrame: 1,
+        gender: 1
+    };
+
+    window.popEnsureLook = function () {
+        try {
+            const key = charStorageKey(), state = charState();
+
+            if (!key || !state) return;
+
+            const placeholder = typeof state.shirtFrame !== "string" ||
+                                typeof state.pantsFrame !== "string" ||
+                                !state.hairFrame || state.hairFrame === 1;
+
+            if (!placeholder) return;
+
+            const name = key.slice(key.indexOf("//") + 2);
+            localStorage.setItem(key, buildLso(name, Object.assign({}, state, DEFAULT_LOOK)));
         } catch (err) { }
     };
 
