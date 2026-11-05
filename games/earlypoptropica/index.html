@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Early Poptropica</title>
+    <script>window.RufflePlayer = window.RufflePlayer || {}; window.RufflePlayer.config = { quality: "low" };</script>
+
+    <script src="../../ruffle/ruffle.js"></script>
+    <style>
+        html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #139ffd; }
+        body { display: flex; align-items: center; justify-content: center; }
+        #game { width: 1010px; height: 673px; max-width: 100%; max-height: 100%; }
+        #game embed { display: block; }
+    </style>
+</head>
+<body>
+    <div id="game"></div>
+
+    <script>
+    /*
+        Static stand-in for the curation's base.php.
+
+        base.php is only a bootstrap: it reads the request parameters, decides
+        which of the patched start-up SWFs to load, and exposes a handful of JS
+        callbacks the SWFs call back into. The new-player path is the part that
+        matters here — without it the client finds no character save and stalls on
+        its "user data lost" recovery screen, which is what happens if you load
+        framework.swf directly.
+
+        Flow reproduced from base.php:
+          createUser.swf  -> creates the character save, then calls flashpointLoad()
+          framework.swf   -> the actual client, which loads scenes/islandEarly/*
+    */
+    (function () {
+        var params = new URLSearchParams(location.search);
+        var island = params.get('island') || 'Early';
+        var scene  = params.get('scene')  || 'City2';
+        var holder = document.getElementById('game');
+
+        function embed(src, flashvars) {
+            holder.innerHTML = '';
+            var el = document.createElement('embed');
+            el.setAttribute('src', src);
+            el.setAttribute('type', 'application/x-shockwave-flash');
+            el.setAttribute('width', '100%');
+            el.setAttribute('height', '100%');
+            el.setAttribute('scale', 'noscale');
+            el.setAttribute('wmode', 'opaque');
+            el.setAttribute('menu', 'false');
+            el.setAttribute('bgcolor', '#139ffd');
+            el.setAttribute('flashvars', flashvars);
+            holder.appendChild(el);
+        }
+
+        function gameVars(desc, isl) {
+            return 'desc=' + encodeURIComponent(desc) +
+                   '&island=' + encodeURIComponent(isl) +
+                   '&startup_path=gameplay&state=return_user_standard';
+        }
+
+        // The slice of base.php's API that the start-up SWFs call into.
+        window.flashpointLoad = function () {
+            embed('./framework.swf', gameVars(scene, island));
+        };
+        window.flashpointError = function (recoverable) {
+            console.error('flashpointError (recoverable=' + recoverable + ')');
+        };
+        window.dbug = function (message) { console.log(message); };
+        window.setAdStatus = function () { return true; };
+        window.setCharLazyLoadStatus = function () { return false; };
+        window.loadTrackingPixel = function () {};
+        window.finalize = function () {};
+        window.returnUser = window.newUserAccept = window.returnUserAccept = window.flashpointLoad;
+
+        embed('./flashpoint/createUser.swf', gameVars(scene, island));
+    })();
+    </script>
+</body>
+</html>
