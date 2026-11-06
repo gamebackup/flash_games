@@ -669,9 +669,14 @@ function loadFPStart(extraMenuSrc, width, height, flashvars) {
     mountMenu(extraMenuSrc, width, 58, flashvars);
 
     window.flashpointLoad = function () {
-        mountGame(SWF_STATES[STATE_SCENE], width, height, flashvars);
-        placeMounts();
-        fitStage();
+        // PopUtils.loadScene reaches this through ExternalInterface, so mount on a fresh
+        // task for the same reason as finalize: on a restart this replaces a live player
+        // and would destroy it while Ruffle still has its core locked.
+        setTimeout(function () {
+            mountGame(SWF_STATES[STATE_SCENE], width, height, flashvars);
+            placeMounts();
+            fitStage();
+        }, 0);
     };
 
     window.setInteractivity = function (enabled) {
@@ -1001,11 +1006,29 @@ window.popAccounts = function () {
        can coexist in one browser, and the game only ever reads one of them, so writing
        a single key let the panel edit a save the client never opened.
     */
+    /*
+       The client stores gender as 0 (girl) or 1 (boy), and gameplay's verifyUserData()
+       opens popups/lostlook.swf ("your game data has been lost") whenever the save holds
+       anything else - including nothing at all, or the "M"/"F" the tracking calls use.
+       The character creator writes its own save after the page mounts, so normalise on
+       every write and not just when seeding a default.
+    */
+    function genderCode(value) {
+        if (value === 0 || value === 1) return value;
+        if (value === true) return 1;
+        if (value === false) return 0;
+
+        const text = String(value == null ? "" : value).trim().toLowerCase();
+
+        return text === "0" || text === "f" || text === "girl" || text === "female" ? 0 : 1;
+    }
+
     function writeChar(state) {
-        const keys = charStorageKeys();
+        const keys = charStorageKeys(),
+              normalised = Object.assign({}, state, { gender: genderCode(state.gender) });
 
         keys.forEach(function (key) {
-            localStorage.setItem(key, buildLso("Char", state));
+            localStorage.setItem(key, buildLso("Char", normalised));
         });
 
         return keys.length > 0;
@@ -1195,9 +1218,12 @@ window.popAccounts = function () {
 
             if (!key || !state) return false;
 
-            const login = String(state.login || "").trim() || activeAccount() || "player";
+            const login = String(state.login || "").trim() || activeAccount() || "player",
+                  gender = genderCode(state.gender);
 
-            if (state.login === login && state.Registred === true) return false;
+            // Gender belongs in this check: a save the character creator left without a
+            // valid one makes the client raise lostlook.swf over the island, so heal it.
+            if (state.login === login && state.Registred === true && state.gender === gender) return false;
 
             writeChar(Object.assign({}, state, { login: login, Registred: true }));
 
