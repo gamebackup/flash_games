@@ -148,8 +148,19 @@ const errorText = document.getElementById("errorText"),
 if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js", { scope: "./" }).then(function (reg) {
         console.log("[pop] local account backend ready for", reg.scope);
+
+        // A page is not controlled until the worker activates, so a load that registers
+        // it can still reach the static host and 404. Tell the panel once it takes over,
+        // so the account list fills in without asking for another reload.
+        return navigator.serviceWorker.ready;
+    }).then(function () {
+        window.dispatchEvent(new Event("pop-sw-ready"));
     }, function (err) {
         console.warn("[pop] local account backend unavailable:", err && err.message);
+    });
+
+    navigator.serviceWorker.addEventListener("controllerchange", function () {
+        window.dispatchEvent(new Event("pop-sw-ready"));
     });
 }
 
@@ -169,6 +180,8 @@ function main() {
     if (typeof window.popApplyPendingLogin === "function") window.popApplyPendingLogin();
     if (typeof window.popRestoreLook === "function") window.popRestoreLook();
     if (typeof window.popEnsureLook === "function") window.popEnsureLook();
+    if (typeof window.popEnsureIdentity === "function") window.popEnsureIdentity();
+    if (typeof window.popSeedFirstRun === "function") window.popSeedFirstRun();
 
     // Those rewrote the character save after the panel first drew it.
     if (typeof window.popRefreshPanel === "function") window.popRefreshPanel();
@@ -186,14 +199,19 @@ function main() {
     // The "fresh" marker makes the redirect single-shot: without it a profile with no
     // character reloads into this branch forever and never reaches createUser.swf.
     if (!hasCharacter() && params.fresh !== "1") {
-        setCookieFlag(COOKIE_NEW_USER, true);
+        const seeded = typeof window.popSeedCharacter === "function" && window.popSeedCharacter("player");
 
-        const freshIsland = params.island === "Home" ? "Early" : params.island,
-              freshRoom = params.island === "Home" ? "City2" : params.room;
+        // Falling back to the creator route only if the save could not be written.
+        if (!seeded) {
+            setCookieFlag(COOKIE_NEW_USER, true);
 
-        location.replace(PAGE_BASE + "?island=" + encodeURIComponent(freshIsland) +
-            "&room=" + encodeURIComponent(freshRoom) + "&startup_path=" + PATH_DEFAULT + "&fresh=1");
-        return;
+            const freshIsland = params.island === "Home" ? "Early" : params.island,
+                  freshRoom = params.island === "Home" ? "City2" : params.room;
+
+            location.replace(PAGE_BASE + "?island=" + encodeURIComponent(freshIsland) +
+                "&room=" + encodeURIComponent(freshRoom) + "&startup_path=" + PATH_DEFAULT + "&fresh=1");
+            return;
+        }
     }
 
     flashpointLoad(params.island, params.room, params.startup_path);
@@ -217,24 +235,66 @@ function makeEmbed(id, src, width, height, flashvars) {
     return el;
 }
 
+/*
+   Ruffle's polyfill swaps the <embed> this page appends for a <ruffle-embed> as soon
+   as the player boots, so the node held in game/menu is detached almost immediately.
+   Anything set on that stale node is lost: inline styles (which left the save-data
+   toolbar lying at 0,0 underneath the stage) and the ExternalInterface callbacks the
+   SWFs publish, which is what made "Returning Player" throw "menu.returnUser is not
+   a function". Resolve the live element - the replacement keeps the same id - 
+   instead of trusting the stored reference.
+*/
+function liveMount(el) {
+    if (!el) return null;
+    if (el.isConnected) return el;
+    return (el.id && document.getElementById(el.id)) || null;
+}
+
+// The replacement only exists after polyfilling, so position once now and once after
+// the player has had a frame to appear.
+function placeMounts() {
+    function apply() {
+        const g = liveMount(game), m = liveMount(menu);
+
+        if (g) {
+            g.style.left = "0px";
+            g.style.top = "0px";
+        }
+
+        if (m) {
+            m.style.left = "0px";
+            m.style.top = `${ stageSize.h }px`;  // sits directly under the stage
+            m.removeAttribute("hidden");
+        }
+    }
+
+    apply();
+    requestAnimationFrame(apply);
+}
+
 function mountGame(src, width, height, flashvars) {
-    const fresh = makeEmbed("game", src, width, height, flashvars);
-    if (game && game.isConnected) game.replaceWith(fresh);
+    const fresh = makeEmbed("game", src, width, height, flashvars),
+          prev = liveMount(game);
+
+    if (prev) prev.replaceWith(fresh);
     else stage.appendChild(fresh);
     game = fresh;
     stageSize.w = width;
     stageSize.h = height;
     fitStage();
+    placeMounts();
 }
 
 function mountMenu(src, width, height, flashvars) {
-    const fresh = makeEmbed("game-menu", src, width, height, flashvars);
-    fresh.style.top = `${ stageSize.h }px`;  // sits directly under the stage
-    if (menu && menu.isConnected) menu.replaceWith(fresh);
+    const fresh = makeEmbed("game-menu", src, width, height, flashvars),
+          prev = liveMount(menu);
+
+    if (prev) prev.replaceWith(fresh);
     else stage.appendChild(fresh);
     menu = fresh;
     stageSize.menu = height;
     fitStage();
+    placeMounts();
 }
 
 /*
@@ -247,7 +307,7 @@ function fitStage() {
     if (!stageSize.w || !stageSize.h) return;
 
     const pad = 8,
-          withMenu = menu && menu.isConnected ? stageSize.menu : 0,
+          withMenu = liveMount(menu) ? stageSize.menu : 0,
           w = stageSize.w,
           h = stageSize.h + withMenu;
 
@@ -365,22 +425,27 @@ function loadFPStart(extraMenuSrc, width, height, flashvars) {
 
     window.flashpointLoad = function () {
         mountGame(SWF_STATES[STATE_SCENE], width, height, flashvars);
-        menu.style.top = `${ height }px`;
-        menu.removeAttribute("hidden");
+        placeMounts();
         fitStage();
     };
 
     window.setInteractivity = function (enabled) {
-        menu.style.opacity = game ? game.style.opacity : null;
-        menu.style.opacity = game ? game.style.opacity = enabled ? null : 0.6 : null;
-        menu.style.pointerEvents = enabled ? null : "none";
-        if (game) game.style.pointerEvents = enabled ? null : "none";
+        const g = liveMount(game), m = liveMount(menu);
+
+        if (m) {
+            m.style.opacity = g ? g.style.opacity : null;
+            m.style.opacity = g ? g.style.opacity = enabled ? null : 0.6 : null;
+            m.style.pointerEvents = enabled ? null : "none";
+        }
+
+        if (g) g.style.pointerEvents = enabled ? null : "none";
     };
 
     window.loadTrackingPixel = function () {
         setInteractivity(false);
         // The toolbar is an AS3 shim; this asks it to start a brand new character.
-        if (menu) menu.newUser();
+        const m = liveMount(menu);
+        if (m && typeof m.newUser === "function") m.newUser();
     };
 
     window.newUserAccept = function () {
@@ -390,8 +455,15 @@ function loadFPStart(extraMenuSrc, width, height, flashvars) {
 
     window.returnUser = function () {
         // base.php detaches the stage here and lets the toolbar restore the save.
-        if (game && game.isConnected) game.remove();
-        setTimeout(function () { if (menu) menu.returnUser(); }, 1);
+        const g = liveMount(game);
+
+        if (g) g.remove();
+
+        setTimeout(function () {
+            const m = liveMount(menu);
+
+            if (m && typeof m.returnUser === "function") m.returnUser();
+        }, 1);
     };
 
     window.returnUserAccept = function () {
@@ -422,12 +494,41 @@ function loadFPStart(extraMenuSrc, width, height, flashvars) {
 
     window.finalize = function () {
         setInteractivity(true);
-        if (menu && menu.isConnected) menu.remove();
+
+        const m = liveMount(menu);
+        if (m) m.remove();
         menu = null;
     };
 }
 
 // Utilities
+
+/*
+   Changing islands navigates to home.htm, but the destination does not travel in the
+   URL: the client hands it over with a LocalConnection/POST transport that Ruffle does
+   not implement, so the page arrives bare and falls back to the Home menu. It does
+   trace its intent first - "exitRoomInternal() clipisle Villain, rootisle Home
+   desc : VillainMain,..." - so keep that in sessionStorage, which survives the
+   navigation, and pick it up as the destination on the next load.
+*/
+const PENDING_ISLAND = "pop.pendingIsland";
+const EXIT_TRACE = /exitRoomInternal\(\)\s+clipisle\s+(\w+),\s+rootisle\s+(\w+)\s+desc\s*:\s*(\w+)/;
+
+(function captureIslandExit() {
+    const rawLog = console.log;
+
+    console.log = function () {
+        try {
+            const match = EXIT_TRACE.exec(Array.prototype.join.call(arguments, " "));
+
+            // Only an island change matters here; staying put traces the same island.
+            if (match && match[1] !== match[2])
+                sessionStorage.setItem(PENDING_ISLAND, JSON.stringify({ island: match[1], room: match[3] }));
+        } catch (err) { }
+
+        return rawLog.apply(console, arguments);
+    };
+})();
 
 function getInput() {
     const q = new URLSearchParams(location.search);
@@ -439,7 +540,22 @@ function getInput() {
     obj.roomWasSet = !!obj.room;
     obj.fresh = q.get("fresh");
 
-    const islandGiven = typeof obj.island === "string" && !!obj.island;
+    let islandGiven = typeof obj.island === "string" && !!obj.island;
+    let pending = null;
+
+    // Read the breadcrumb once and forget it, whether or not this load uses it: a stale
+    // one must not hijack a later, deliberate return to the Home menu.
+    try {
+        pending = JSON.parse(sessionStorage.getItem(PENDING_ISLAND) || "null");
+        sessionStorage.removeItem(PENDING_ISLAND);
+    } catch (err) { }
+
+    if (!islandGiven && pending && typeof pending.island === "string" && pending.island) {
+        obj.island = pending.island;
+        if (typeof pending.room === "string" && pending.room) obj.room = pending.room;
+        obj.roomWasSet = true;
+        islandGiven = true;
+    }
 
     /*
         The travel map links to an island as "home.htm?island=Villain" with no room.
@@ -538,6 +654,9 @@ window.popAccounts = function () {
         note.classList.toggle("bad", !!bad);
     }
 
+    // The worker takes control a moment after the first load; fill the list in then.
+    window.addEventListener("pop-sw-ready", function () { refresh(); });
+
     /*
        Reads one shared object written by Ruffle: 2 byte magic, total length, "TCSO",
        a version u16 and a zero u32, a u32 name length, the name, a u32 pad, then
@@ -585,15 +704,48 @@ window.popAccounts = function () {
         return out;
     }
 
-    function charStorageKey() {
+    function charStorageKeys() {
+        const out = [];
+
         try {
             for (let i = 0; i < localStorage.length; i++) {
                 const key = localStorage.key(i);
-                if (key && key.endsWith("//Char")) return key;
+                if (key && key.endsWith("//Char")) out.push(key);
             }
         } catch (err) { }
 
-        return null;
+        return out;
+    }
+
+    function charStorageKey() {
+        const keys = charStorageKeys();
+
+        for (let i = 0; i < keys.length; i++) {
+            // Ruffle keys shared objects by the SWF's host with no port
+            // ("127.0.0.1//Char"). An older seeding path also wrote a port-qualified
+            // twin ("127.0.0.1:8899//Char") that the client never reads, so prefer the
+            // port-less key when both are present.
+            const host = keys[i].slice(0, keys[i].indexOf("//"));
+
+            if (host.indexOf(":") === -1) return keys[i];
+        }
+
+        return keys.length ? keys[0] : null;
+    }
+
+    /*
+       Writes the character save to every "//Char" key that exists. Two host spellings
+       can coexist in one browser, and the game only ever reads one of them, so writing
+       a single key let the panel edit a save the client never opened.
+    */
+    function writeChar(state) {
+        const keys = charStorageKeys();
+
+        keys.forEach(function (key) {
+            localStorage.setItem(key, buildLso("Char", state));
+        });
+
+        return keys.length > 0;
     }
 
     function charState() {
@@ -629,8 +781,30 @@ window.popAccounts = function () {
         w16(0);
         w32(name.length); wStr(name); w32(0);
 
-        Object.keys(obj).forEach(function (key) {
-            const value = obj[key];
+        /*
+           The save-data toolbar (flashpoint/saveData.swf) only hands "Returning
+           Player" a restore when the character save carries flashpointReady - base.php
+           gave it that field in the curation, with no way to do it from a static host.
+           Without the field the button warns "No save data exists" and reloads, even
+           though the character is sitting right there.
+        */
+        let fields = obj;
+
+        if (name === "Char") {
+            fields = Object.assign({}, obj, { flashpointReady: true });
+
+            /*
+               A character carrying a login name is a registered account on this
+               mirror - sw.js answers login.php with registered:"1" - but nothing on a
+               static host writes that back into the save, so the client kept its own
+               isRegistred at false and treated a restored character as a guest.
+            */
+            if (typeof fields.login === "string" && fields.login.trim())
+                fields.Registred = true;
+        }
+
+        Object.keys(fields).forEach(function (key) {
+            const value = fields[key];
 
             w16(key.length); wStr(key);
 
@@ -679,8 +853,7 @@ window.popAccounts = function () {
             const key = charStorageKey(), state = charState();
 
             if (key && state) {
-                const name = key.slice(key.indexOf("//") + 2),
-                      next = Object.assign({}, state, { login: pending });
+                const next = Object.assign({}, state, { login: pending });
 
                 if (avatar && typeof avatar === "object") {
                     Object.keys(avatar).forEach(function (name) {
@@ -690,7 +863,7 @@ window.popAccounts = function () {
                     });
                 }
 
-                localStorage.setItem(key, buildLso(name, next));
+                writeChar(next);
                 localStorage.setItem(ACTIVE_ACCOUNT, pending);
             }
         } catch (err) { }
@@ -741,9 +914,67 @@ window.popAccounts = function () {
 
             if (!placeholder) return;
 
-            const name = key.slice(key.indexOf("//") + 2);
-            localStorage.setItem(key, buildLso(name, Object.assign({}, state, DEFAULT_LOOK)));
+            writeChar(Object.assign({}, state, DEFAULT_LOOK));
         } catch (err) { }
+    };
+
+    /*
+       This mirror boots straight into the island, so the client's own login flow never
+       runs and nothing ever writes a login name into the character save - the panel
+       showed "Saved game login: none" and the client's isRegistred stayed false, which
+       is what made a restored character an unregistered guest. Every local account is
+       a registered account here (sw.js answers login.php with registered:"1"), so stamp
+       the account that is playing onto the save before the game reads it.
+    */
+    window.popEnsureIdentity = function () {
+        try {
+            const key = charStorageKey(), state = charState();
+
+            if (!key || !state) return false;
+
+            const login = String(state.login || "").trim() || activeAccount() || "player";
+
+            if (state.login === login && state.Registred === true) return false;
+
+            writeChar(Object.assign({}, state, { login: login, Registred: true }));
+
+            try { localStorage.setItem(ACTIVE_ACCOUNT, login); } catch (err) { }
+
+            return true;
+        } catch (err) {
+            return false;
+        }
+    };
+
+    /*
+       Writes a complete default character when the browser has none at all, so the
+       client never reads the placeholder save createUser.swf leaves behind - that
+       placeholder is what raises the "user data lost" card on a brand-new profile.
+       Ruffle keys shared objects as "<host>//<name>", so reuse the host of any shared
+       object already present and fall back to the page's own host.
+    */
+    window.popSeedCharacter = function (login) {
+        try {
+            if (charState()) return false;
+
+            let host = null;
+
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key && key.indexOf("//") > -1) { host = key.slice(0, key.indexOf("//")); break; }
+            }
+
+            const state = Object.assign({}, DEFAULT_LOOK, {
+                login: String(login || "player"),
+                Registred: false,
+                visited: "0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"
+            });
+
+            localStorage.setItem((host || location.host) + "//Char", buildLso("Char", state));
+            return true;
+        } catch (err) {
+            return false;
+        }
     };
 
     /*
@@ -771,8 +1002,7 @@ window.popAccounts = function () {
                 // survives loads where the save was still intact - otherwise it would
                 // be deleted on the creator's own load, before that load wipes the save.
                 if (missing.length >= 6) {
-                    const name = key.slice(key.indexOf("//") + 2);
-                    localStorage.setItem(key, buildLso(name, Object.assign({}, state, saved)));
+                    writeChar(Object.assign({}, state, saved));
                     localStorage.removeItem(LOOK_BACKUP);
                 }
             }
@@ -926,6 +1156,74 @@ window.popAccounts = function () {
 
     let refreshSeq = 0;
 
+    /*
+       First run in a browser: the client's own creator leaves a placeholder character
+       and no account record at all, so the panel has nothing to list and switching
+       accounts cannot work. Register the character that is on screen as a real local
+       account, once per load, so a fresh profile starts with a proper character
+       instead of depending on the look guard alone.
+    */
+    let seedTried = false;
+
+    async function seedFirstRun(known) {
+        if (seedTried) return known || [];
+
+        // Called both from the panel's refresh and from main(); when the caller has no
+        // list yet (the service worker is not in control on a profile's very first
+        // load, so __pop_accounts.php 404s), ask for one here instead of giving up.
+        let accounts = known;
+
+        if (!accounts) {
+            try {
+                accounts = (await (await fetch("__pop_accounts.php?seed=1", { cache: "no-store" })).json()).accounts || [];
+            } catch (err) {
+                // The worker is not serving this page yet on a profile's first load, so
+                // give up for now instead of retrying on every watcher tick.
+                seedTried = true;
+                return [];
+            }
+        }
+
+        seedTried = true;
+
+        if (accounts.length) return accounts;
+
+        const key = charStorageKey(), state = charState();
+
+        // No character yet - the creator has not written one. Leave seedTried false so
+        // the save watcher can try again once it appears.
+        if (!key || !state) {
+            seedTried = false;
+            return accounts;
+        }
+
+        const username = String(state.login || "").trim().toLowerCase() || "player";
+
+        try {
+            const body = new URLSearchParams({
+                username: username,
+                gender: state.gender === 0 ? "F" : "M",
+                look: JSON.stringify(appearanceOf(state))
+            });
+
+            await fetch("part-register.php", {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: body.toString()
+            });
+
+            await rememberChar(username, appearanceOf(state));
+
+            try { localStorage.setItem(ACTIVE_ACCOUNT, username); } catch (err) { }
+
+            return (await (await fetch("__pop_accounts.php")).json()).accounts || accounts;
+        } catch (err) {
+            return accounts;
+        }
+    }
+
+    window.popSeedFirstRun = seedFirstRun;
+
     async function refresh() {
         // Reachable from main(): the panel is built before a queued character change is
         // applied, so it has to re-read once that has happened. Two runs can overlap
@@ -956,8 +1254,24 @@ window.popAccounts = function () {
             charBox.textContent = "No character save yet.";
         }
 
+        /*
+           Accounts come from sw.js, so without a worker every .php call lands on the
+           static host as a 404. Say which of the two reasons applies instead of
+           showing "unavailable" and a console full of failures.
+        */
+        if (!("serviceWorker" in navigator)) {
+            list.appendChild(emptyRow("Local accounts need a service worker, which this window does not provide - private/incognito browsing disables them. Open the game in a normal window."));
+            return;
+        }
+
+        if (!navigator.serviceWorker.controller) {
+            list.appendChild(emptyRow("Starting the local account backend - the list will fill in by itself."));
+            return;
+        }
+
         try {
             accounts = (await (await fetch("__pop_accounts.php")).json()).accounts || [];
+        accounts = await seedFirstRun(accounts);
         } catch (err) {
             list.appendChild(emptyRow("Local accounts unavailable."));
             return;
@@ -1242,6 +1556,22 @@ if (fsBtn) fsBtn.addEventListener("click", function () {
 });
 
 document.addEventListener("fullscreenchange", fitStage);
+
+/*
+   flashpoint/createUser.swf writes its Character save after the page has mounted, so a
+   heal or a first-run registration done in main() cannot see it: at that moment there
+   is no save at all. Watch for it to appear and re-run both, which is what makes a
+   brand-new profile end up with a real character and a real local account.
+   Rewriting localStorage here is safe because Ruffle only flushes its own copy over
+   the top when the page unloads.
+*/
+const saveWatcher = setInterval(function () {
+    if (typeof window.popEnsureLook === "function") window.popEnsureLook();
+    if (typeof window.popEnsureIdentity === "function") window.popEnsureIdentity();
+    if (typeof window.popSeedFirstRun === "function") window.popSeedFirstRun();
+}, 2000);
+
+setTimeout(function () { clearInterval(saveWatcher); }, 180000);
 
 // The game starts last: the accounts panel above defines popApplyPendingLogin, and a
 // queued character rename must be written before Ruffle mounts and starts flushing.

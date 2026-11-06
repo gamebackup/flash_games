@@ -257,6 +257,30 @@ const ENDPOINTS = {
         return jsonResponse({ ok: 1, username: username });
     },
 
+    /*
+       Session check. StatusManager posts here (login/pass_hash/dbid) on island
+       changes and treats any reply without status_ok as a failure: onLoad runs
+       showStatusPopup(), which loads popups/status.swf. This mirror has no such
+       file, so the 404 left the travelmap blocked mid-click. Answer the check the
+       way the live site did and the popup is never asked for.
+    */
+    async "status.php"() {
+        return formResponse({ status_ok: "1", success: 1, ok: 1 });
+    },
+
+    /*
+       Telemetry sink. gameplay.swf fires brain//track.php on every room load, and the
+       static host answered it with the placeholder file, so each beacon cost a round
+       trip and a log line for data nobody reads. Answer it here, empty, and it never
+       leaves the browser.
+    */
+    async "track.php"() {
+        return new Response("", {
+            status: 200,
+            headers: { "Content-Type": "text/plain; charset=utf-8" }
+        });
+    },
+
     /* Debug helper: lets the page list what is stored in this browser. */
     async "__pop_accounts.php"() {
         return jsonResponse({ accounts: await allAccounts() });
@@ -277,6 +301,16 @@ self.addEventListener("activate", function (event) { event.waitUntil(self.client
 self.addEventListener("fetch", function (event) {
     const url = new URL(event.request.url);
     if (url.origin !== self.location.origin) return;
+
+    // Page loads always come from the network. This mirror is edited in place, and a
+    // cached copy silently keeps the old script alive - including across the island
+    // changes that reload home.htm - so the fix written to disk never runs.
+    if (event.request.mode === "navigate") {
+        event.respondWith(fetch(event.request, { cache: "no-store" }).catch(function () {
+            return fetch(event.request);
+        }));
+        return;
+    }
 
     const name = url.pathname.split("/").pop();
     if (!name || !name.endsWith(".php")) return;      // only the client's .php calls
