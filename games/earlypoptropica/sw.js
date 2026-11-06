@@ -348,7 +348,25 @@ self.addEventListener("install", function () { self.skipWaiting(); });
 self.addEventListener("activate", function (event) { event.waitUntil(self.clients.claim()); });
 
 self.addEventListener("fetch", function (event) {
-    const url = new URL(event.request.url);
+    /*
+       A getURL("") from the client reaches here as a request with an empty URL, and
+       new URL("") throws - which aborts the handler and surfaces as "Failed to load ''.
+       A ServiceWorker intercepted the request and encountered an unexpected error."
+       Ignore anything that will not parse instead of failing the whole event.
+    */
+    let url;
+
+    try {
+        if (!event.request.url) {
+            // getURL("") - answer it, so the console does not report a failed load.
+            event.respondWith(new Response(null, { status: 204 }));
+            return;
+        }
+        url = new URL(event.request.url);
+    } catch (err) {
+        return;
+    }
+
     if (url.origin !== self.location.origin) return;
 
     // Page loads always come from the network. This mirror is edited in place, and a
