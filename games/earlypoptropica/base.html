@@ -155,12 +155,19 @@ const errorText = document.getElementById("errorText"),
    is what turned that reasonably-relative path into a 404 against the site root.
 */
 (function answerLegacyEndpoints() {
+    // Only the replies the client actually reads are listed. Anything else it calls
+    // falls through to the generic answer below, which is the point: the SWFs carry
+    // around sixty distinct root-absolute *.php calls (items, badges, quizzes,
+    // quidgets, telemetry ...), so an explicit list means a fresh 501 the first time
+    // a scene reaches one it has not met yet - which is exactly what happened with
+    // get_mem_status.php and get_island_info.php.
     const ANSWERS = {
         // Empty, not ".": the client concatenates this straight onto paths like
         // "images//flags/flag-index.txt", so a dot turns them into ".images/..." and
         // every one of them 404s. Empty keeps them relative, which resolves beside
         // the SWF and is what this mirror serves.
         "getPrefix.php": "prefix=",
+        "status.php": "status_ok=1&success=1&ok=1",
         "get_campaign_list.php": "ok=1&success=1",
         "time_limited_is_active.php": "ok=1&success=1",
         "visit_scene.php": "ok=1&success=1",
@@ -168,18 +175,35 @@ const errorText = document.getElementById("errorText"),
         "get_user_photos.php": "ok=1&success=1"
     };
 
+    const GENERIC = "ok=1&success=1";
+
+    // Requests inside this folder belong to sw.js: login.php, register.php and the
+    // __pop_*.php account routes are answered there from IndexedDB, and shadowing
+    // them here would break sign-in.
+    const folder = location.pathname.replace(/[^/]*$/, "");
+
+    function answer(body) {
+        return Promise.resolve(new Response(body, {
+            status: 200,
+            headers: { "Content-Type": "text/plain; charset=utf-8" }
+        }));
+    }
+
     const realFetch = window.fetch.bind(window);
 
     window.fetch = function (input, init) {
         try {
-            const url = typeof input === "string" ? input : (input && input.url) || "",
-                  name = new URL(url, location.href).pathname.split("/").pop();
+            const raw = typeof input === "string" ? input : (input && input.url) || "",
+                  url = new URL(raw, location.href),
+                  inside = folder.length > 1 && url.pathname.indexOf(folder) === 0;
 
-            if (Object.prototype.hasOwnProperty.call(ANSWERS, name))
-                return Promise.resolve(new Response(ANSWERS[name], {
-                    status: 200,
-                    headers: { "Content-Type": "text/plain; charset=utf-8" }
-                }));
+            // Every one of those calls is root-absolute, so a static host can only
+            // answer it with 501/405 - there is nothing it could run. Answer here
+            // instead, before Ruffle ever sends it.
+            if (url.origin === location.origin && !inside && /\.php$/i.test(url.pathname)) {
+                const name = url.pathname.split("/").pop();
+                return answer(Object.prototype.hasOwnProperty.call(ANSWERS, name) ? ANSWERS[name] : GENERIC);
+            }
         } catch (err) { }
 
         return realFetch(input, init);
