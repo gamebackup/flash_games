@@ -172,7 +172,18 @@ const errorText = document.getElementById("errorText"),
         "time_limited_is_active.php": "ok=1&success=1",
         "visit_scene.php": "ok=1&success=1",
         "get_scene_photos.php": "ok=1&success=1",
-        "get_user_photos.php": "ok=1&success=1"
+        "get_user_photos.php": "ok=1&success=1",
+
+        // char.swf's island-data onLoad calls its dataReadyCallback only when answer is
+        // "ok" (with a parseable json) or "noIslandInfo" - the old ok=1&success=1 body
+        // was neither, so the character-restore path never signalled ready. Island data
+        // already persists in the client's own shared object here, so "no server-side
+        // info" is both the honest answer and the one that lets the load continue.
+        "get_island_info.php": "answer=noIslandInfo",
+
+        // Its onLoad parses islands_json only under answer=ok, and calls the callback
+        // either way. An empty object means this account has finished nothing.
+        "list_finished_islands.php": "answer=ok&islands_json={}"
     };
 
     const GENERIC = "ok=1&success=1";
@@ -202,6 +213,13 @@ const errorText = document.getElementById("errorText"),
             // instead, before Ruffle ever sends it.
             if (url.origin === location.origin && !inside && /\.php$/i.test(url.pathname)) {
                 const name = url.pathname.split("/").pop();
+
+                // time.php's reply carries no key: sendAndLoad reads the parameter NAME
+                // as the timestamp ("for(_loc1_ in receiver) islandTimes[island].end =
+                // _loc1_"), so a named flag like ok=1 becomes a bogus clock reading.
+                if (name === "time.php")
+                    return answer(Math.floor(Date.now() / 1000) + "=");
+
                 return answer(Object.prototype.hasOwnProperty.call(ANSWERS, name) ? ANSWERS[name] : GENERIC);
             }
         } catch (err) { }
