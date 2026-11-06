@@ -698,17 +698,26 @@ function loadFPStart(extraMenuSrc, width, height, flashvars) {
         finalize();
     };
 
+    /*
+       ActionScript calls everything below, so Ruffle is still executing on the stack
+       while it runs. Removing a <ruffle-embed> at that moment destroys the instance
+       with its core borrowed, which logs "Unable to lock Ruffle core", then "Ruffle
+       instance destroyed", then "Unable to borrow Ruffle instance" for the rest of the
+       frame. Hand every teardown to a fresh task so the call can return first.
+    */
     window.returnUser = function () {
         // base.php detaches the stage here and lets the toolbar restore the save.
-        const g = liveMount(game);
-
-        if (g) g.remove();
-
         setTimeout(function () {
-            const m = liveMount(menu);
+            const g = liveMount(game);
 
-            if (m && typeof m.returnUser === "function") m.returnUser();
-        }, 1);
+            if (g) g.remove();
+
+            setTimeout(function () {
+                const m = liveMount(menu);
+
+                if (m && typeof m.returnUser === "function") m.returnUser();
+            }, 1);
+        }, 0);
     };
 
     window.returnUserAccept = function () {
@@ -737,12 +746,21 @@ function loadFPStart(extraMenuSrc, width, height, flashvars) {
         return setCookieFlag(COOKIE_CHARS, enabled);
     };
 
-    window.finalize = function () {
-        setInteractivity(true);
+    let finalizing = false;
 
-        const m = liveMount(menu);
-        if (m) m.remove();
-        menu = null;
+    window.finalize = function () {
+        // Confirming a new character calls this from the toolbar's own click handler.
+        if (finalizing) return;
+        finalizing = true;
+
+        setTimeout(function () {
+            setInteractivity(true);
+
+            const m = liveMount(menu);
+            if (m) m.remove();
+            menu = null;
+            finalizing = false;
+        }, 0);
     };
 }
 
