@@ -274,7 +274,11 @@ const ENDPOINTS = {
        way the live site did and the popup is never asked for.
     */
     async "status.php"() {
-        return formResponse({ status_ok: "1", success: 1, ok: 1 });
+        // StatusManager.checkStatus reads receiver.answer and, unless it is exactly
+        // "ok", calls showStatusPopup(receiver.answer, receiver.message) - which loads
+        // popups/status.swf over the scene. status_ok alone sent every check down that
+        // path; it stays for the callers that read that field instead.
+        return formResponse({ answer: "ok", status_ok: "1", success: 1, ok: 1 });
     },
 
     /*
@@ -314,8 +318,12 @@ ENDPOINTS["reguser.php"] = ENDPOINTS["register.php"];
 */
 const LEGACY = {
     "get_campaign_list.php": "ok=1&success=1",
-    "time_limited_is_active.php": "ok=1&success=1",
     "visit_scene.php": "ok=1&success=1",
+    "reset_island.php": "answer=ok&success=1&ok=1",
+    // Basename, not the full path: the handler looks up url.pathname's last segment.
+    "save_feed_item.php": "answer=ok&success=1&ok=1",
+    "get_promo_code_uses.php": "answer=ok&json={}",
+    "time_limited_is_active.php": "answer=ok&json={}",
     "get_scene_photos.php": "answer=ok&json={}",
     "get_user_photos.php": "answer=ok&json={}",
     "get_island_info.php": "answer=noIslandInfo",
