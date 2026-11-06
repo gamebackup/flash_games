@@ -1168,6 +1168,14 @@ window.popAccounts = function () {
     async function seedFirstRun(known) {
         if (seedTried) return known || [];
 
+        /*
+           Until the worker controls this page its endpoints are just files that do
+           not exist, so asking here is what produced the "__pop_accounts.php 404" a
+           first load logs. pop-sw-ready fires once it takes over and re-runs this.
+        */
+        if (!("serviceWorker" in navigator) || !navigator.serviceWorker.controller)
+            return known || [];
+
         // Called both from the panel's refresh and from main(); when the caller has no
         // list yet (the service worker is not in control on a profile's very first
         // load, so __pop_accounts.php 404s), ask for one here instead of giving up.
