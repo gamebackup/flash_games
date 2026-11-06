@@ -171,8 +171,13 @@ const errorText = document.getElementById("errorText"),
         "get_campaign_list.php": "ok=1&success=1",
         "time_limited_is_active.php": "ok=1&success=1",
         "visit_scene.php": "ok=1&success=1",
-        "get_scene_photos.php": "ok=1&success=1",
-        "get_user_photos.php": "ok=1&success=1",
+
+        // ScenePhotoManager gates both of these on answer=="ok" and then parses a json
+        // blob of photo rows, so the generic ok body made them do nothing while
+        // get_user_photos traced an error. An empty object is the honest reply for a
+        // mirror with no server-side rows, and it parses cleanly into zero photos.
+        "get_scene_photos.php": "answer=ok&json={}",
+        "get_user_photos.php": "answer=ok&json={}",
 
         // char.swf's island-data onLoad calls its dataReadyCallback only when answer is
         // "ok" (with a parseable json) or "noIslandInfo" - the old ok=1&success=1 body
@@ -188,10 +193,22 @@ const errorText = document.getElementById("errorText"),
 
     const GENERIC = "ok=1&success=1";
 
-    // Requests inside this folder belong to sw.js: login.php, register.php and the
-    // __pop_*.php account routes are answered there from IndexedDB, and shadowing
-    // them here would break sign-in.
-    const folder = location.pathname.replace(/[^/]*$/, "");
+    // These names belong to sw.js, which answers them from IndexedDB: the account
+    // routes are the local account backend and track.php is its telemetry route.
+    // Shadowing one here would break sign-in or persistence, so they are the only
+    // .php paths that must reach the worker.
+    const WORKER_OWNS = {
+        "login.php": 1,
+        "part-register.php": 1,
+        "register.php": 1,
+        "reguser.php": 1,
+        "status.php": 1,
+        "track.php": 1,
+        "__pop_accounts.php": 1,
+        "__pop_import_accounts.php": 1,
+        "__pop_delete_account.php": 1,
+        "__pop_set_char.php": 1
+    };
 
     function answer(body) {
         return Promise.resolve(new Response(body, {
@@ -205,22 +222,26 @@ const errorText = document.getElementById("errorText"),
     window.fetch = function (input, init) {
         try {
             const raw = typeof input === "string" ? input : (input && input.url) || "",
-                  url = new URL(raw, location.href),
-                  inside = folder.length > 1 && url.pathname.indexOf(folder) === 0;
+                  url = new URL(raw, location.href);
 
-            // Every one of those calls is root-absolute, so a static host can only
-            // answer it with 501/405 - there is nothing it could run. Answer here
-            // instead, before Ruffle ever sends it.
-            if (url.origin === location.origin && !inside && /\.php$/i.test(url.pathname)) {
+            // A static host can only answer a .php call with 501/405 - there is nothing
+            // it could run. Answer here instead, before Ruffle ever sends it. The test
+            // is the route name rather than the folder: getPrefix answers "", so the
+            // client resolves paths like "photos//get_scene_photos.php" against the
+            // mirror itself, inside the folder where sw.js has no route for them.
+            if (url.origin === location.origin && /\.php$/i.test(url.pathname)) {
                 const name = url.pathname.split("/").pop();
 
-                // time.php's reply carries no key: sendAndLoad reads the parameter NAME
-                // as the timestamp ("for(_loc1_ in receiver) islandTimes[island].end =
-                // _loc1_"), so a named flag like ok=1 becomes a bogus clock reading.
-                if (name === "time.php")
-                    return answer(Math.floor(Date.now() / 1000) + "=");
+                if (WORKER_OWNS[name] !== 1) {
+                    // time.php's reply carries no key: sendAndLoad reads the parameter
+                    // NAME as the timestamp ("for(_loc1_ in receiver) islandTimes[island]
+                    // .end = _loc1_"), so a named flag like ok=1 becomes a bogus clock
+                    // reading.
+                    if (name === "time.php")
+                        return answer(Math.floor(Date.now() / 1000) + "=");
 
-                return answer(Object.prototype.hasOwnProperty.call(ANSWERS, name) ? ANSWERS[name] : GENERIC);
+                    return answer(Object.prototype.hasOwnProperty.call(ANSWERS, name) ? ANSWERS[name] : GENERIC);
+                }
             }
         } catch (err) { }
 
