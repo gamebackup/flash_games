@@ -142,6 +142,50 @@ const PAGE_BASE = "base.html"; // this page under the name the SWFs navigate to.
 const errorText = document.getElementById("errorText"),
       lsKey = "lastScene";
 
+/*
+   The client posts to a handful of legacy endpoints with a leading slash, so they
+   land on the site root where a static host answers 405/501 - and a host has no way
+   to run them, since they are POSTs. sw.js can only catch the ones inside this
+   folder, and a private window has no service worker at all. Answer them here, in
+   the page, before Ruffle's loader gets a chance to send them: Ruffle fetches
+   through window.fetch, so this sees the request first in every browser.
+
+   getPrefix is the one that matters: its reply becomes the base the client resolves
+   framework/data/config.xml against, and an unanswered POST left it absolute, which
+   is what turned that reasonably-relative path into a 404 against the site root.
+*/
+(function answerLegacyEndpoints() {
+    const ANSWERS = {
+        // Empty, not ".": the client concatenates this straight onto paths like
+        // "images//flags/flag-index.txt", so a dot turns them into ".images/..." and
+        // every one of them 404s. Empty keeps them relative, which resolves beside
+        // the SWF and is what this mirror serves.
+        "getPrefix.php": "prefix=",
+        "get_campaign_list.php": "ok=1&success=1",
+        "time_limited_is_active.php": "ok=1&success=1",
+        "visit_scene.php": "ok=1&success=1",
+        "get_scene_photos.php": "ok=1&success=1",
+        "get_user_photos.php": "ok=1&success=1"
+    };
+
+    const realFetch = window.fetch.bind(window);
+
+    window.fetch = function (input, init) {
+        try {
+            const url = typeof input === "string" ? input : (input && input.url) || "",
+                  name = new URL(url, location.href).pathname.split("/").pop();
+
+            if (Object.prototype.hasOwnProperty.call(ANSWERS, name))
+                return Promise.resolve(new Response(ANSWERS[name], {
+                    status: 200,
+                    headers: { "Content-Type": "text/plain; charset=utf-8" }
+                }));
+        } catch (err) { }
+
+        return realFetch(input, init);
+    };
+})();
+
 // Local accounts: sw.js answers login.php / part-register.php / register.php from
 // this browser's IndexedDB, so accounts work on a static host. Scoped to this
 // folder, so it never touches anything else on the origin.
