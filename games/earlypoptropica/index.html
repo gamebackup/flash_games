@@ -243,8 +243,14 @@ const errorText = document.getElementById("errorText"),
     // Directories that exist only inside this folder. A client that has lost its base
     // asks for "/framework/data/config.xml"; the file it wants is "<folder>framework/...".
     const GAME_DIRS = ["avatarParts", "brain", "comics", "creatorClips", "externalAssets",
-                       "flashpoint", "framework", "images", "items", "photos", "popups",
-                       "ratings", "scenes", "video"];
+                       "flashpoint", "framework", "games", "images", "items", "photos",
+                       "popups", "ratings", "scenes", "video"];
+
+    // Root-level files the client builds as prefix + "/" + name. The framework starts a
+    // movie that way from its startup_path flashvar, so an empty prefix asks the origin
+    // for "/gameplay.swf" instead of the copy beside the page. Only these extensions
+    // are rebased, so an unrelated site-root request is never pulled into the folder.
+    const GAME_FILE = /\.(swf|xml|txt|json|htm|html)$/i;
 
     function phpBody(pathname) {
         const name = pathname.split("/").pop();
@@ -257,14 +263,19 @@ const errorText = document.getElementById("errorText"),
         return Object.prototype.hasOwnProperty.call(ANSWERS, name) ? ANSWERS[name] : GENERIC;
     }
 
-    // Null unless the first segment is one of the game's own folders, so a genuine
-    // site-root asset is never redirected by accident.
+    // Null unless the path really is game content, so a genuine site-root asset is
+    // never redirected by accident.
     function rebase(pathname) {
         if (folder.length <= 1 || pathname.indexOf(folder) === 0) return null;
 
-        const first = pathname.replace(/^\/+/, "").split("/")[0];
+        const rel = pathname.replace(/^\/+/, ""),
+              slash = rel.indexOf("/"),
+              first = slash === -1 ? rel : rel.slice(0, slash);
 
-        return GAME_DIRS.indexOf(first) === -1 ? null : folder + pathname.replace(/^\/+/, "");
+        // A bare file: "/gameplay.swf", "/char.swf", "/home.htm".
+        if (slash === -1) return GAME_FILE.test(first) ? folder + rel : null;
+
+        return GAME_DIRS.indexOf(first) === -1 ? null : folder + rel;
     }
 
     window.fetch = function (input, init) {
@@ -284,7 +295,9 @@ const errorText = document.getElementById("errorText"),
                         return answer(phpBody(url.pathname));
                 } else {
                     const moved = rebase(url.pathname);
-                    if (moved) return realFetch(moved, init);
+
+                    // Keep the query: those island links carry ?island=...&room=...
+                    if (moved) return realFetch(moved + url.search, init);
                 }
             }
         } catch (err) { }
@@ -318,7 +331,7 @@ const errorText = document.getElementById("errorText"),
                         args[1] = abs.href;
                     } else if (!/\.php$/i.test(abs.pathname)) {
                         const moved = rebase(abs.pathname);
-                        if (moved) args[1] = moved;
+                        if (moved) args[1] = moved + abs.search;   // keep ?island=...&room=...
                     }
                 }
             } catch (err) { }
