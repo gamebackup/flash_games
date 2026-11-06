@@ -6,9 +6,11 @@
     intercepts them for this folder only and answers from IndexedDB in this browser.
     Nothing leaves the machine; accounts are per-browser, per-origin.
 
-    Scope note: a service worker sees only requests under its own scope, so the
-    client's relative calls (login.php, part-register.php, photos/...) are handled,
-    while root-absolute strays like /getPrefix.php never reach it.
+    Scope note: a worker controls its clients, not their URLs - once the page is
+    controlled, every subresource it asks for passes through this handler, including
+    root-absolute ones like /getPrefix.php. That is why the legacy bodies below have
+    to be here as well as in the page's fetch shim: Ruffle's LoadVars uses
+    XMLHttpRequest, which the page shim never sees.
 */
 "use strict";
 
@@ -57,6 +59,13 @@ function jsonResponse(obj) {
     return new Response(JSON.stringify(obj), {
         status: 200,
         headers: { "Content-Type": "application/json" }
+    });
+}
+
+function textResponse(body) {
+    return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/plain; charset=utf-8" }
     });
 }
 
@@ -293,6 +302,38 @@ const ENDPOINTS = {
 // takes the same fields as register.php.
 ENDPOINTS["reguser.php"] = ENDPOINTS["register.php"];
 
+/*
+   Bodies for the client's legacy calls. These mirror the page's fetch shim, and
+   they are not redundant with it: the shim only patches window.fetch, while
+   Ruffle's LoadVars goes through XMLHttpRequest and reaches only this worker.
+
+   getPrefix is the one that broke the live site. It used to fall through to the
+   generic ok=1&success=1, which carries no prefix field: the client kept its
+   default base and resolved "framework/data/config.xml" against the site root,
+   where the file does not exist (404), instead of against this folder.
+*/
+const LEGACY = {
+    "get_campaign_list.php": "ok=1&success=1",
+    "time_limited_is_active.php": "ok=1&success=1",
+    "visit_scene.php": "ok=1&success=1",
+    "get_scene_photos.php": "answer=ok&json={}",
+    "get_user_photos.php": "answer=ok&json={}",
+    "get_island_info.php": "answer=noIslandInfo",
+    "list_finished_islands.php": "answer=ok&islands_json={}"
+};
+
+function legacyBody(name) {
+    // Empty, not ".": the client concatenates this straight onto paths like
+    // "framework/data/config.xml", so a dot would make them ".framework/...".
+    if (name === "getPrefix.php") return "prefix=";
+
+    // No key on purpose: the client reads the parameter NAME as the timestamp
+    // ("for (_loc1_ in receiver) islandTimes[island].end = _loc1_").
+    if (name === "time.php") return Math.floor(Date.now() / 1000) + "=";
+
+    return LEGACY[name] || "ok=1&success=1";
+}
+
 /* --------------------------------- plumbing -------------------------------- */
 
 self.addEventListener("install", function () { self.skipWaiting(); });
@@ -321,8 +362,9 @@ self.addEventListener("fetch", function (event) {
             const params = await requestParams(event.request);
             if (handler) return await handler(params, event.request);
 
-            // Anything else the client asks for: succeed quietly instead of 501/404.
-            return formResponse({ ok: 1, success: 1 });
+            // Anything else the client asks for: succeed quietly instead of 501/404,
+            // with the body that call actually reads where we know it.
+            return textResponse(legacyBody(name));
         } catch (err) {
             return formResponse({ error: "dberror", ok: 0 });
         }
