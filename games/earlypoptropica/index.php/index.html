@@ -219,34 +219,140 @@ const errorText = document.getElementById("errorText"),
 
     const realFetch = window.fetch.bind(window);
 
+    const folder = location.pathname.replace(/[^/]*$/, "");
+
+    // Directories that exist only inside this folder. A client that has lost its base
+    // asks for "/framework/data/config.xml"; the file it wants is "<folder>framework/...".
+    const GAME_DIRS = ["avatarParts", "brain", "comics", "creatorClips", "externalAssets",
+                       "flashpoint", "framework", "images", "items", "photos", "popups",
+                       "ratings", "scenes", "video"];
+
+    function phpBody(pathname) {
+        const name = pathname.split("/").pop();
+
+        // time.php's reply carries no key: sendAndLoad reads the parameter NAME as the
+        // timestamp ("for(_loc1_ in receiver) islandTimes[island].end = _loc1_"), so a
+        // named flag like ok=1 becomes a bogus clock reading.
+        if (name === "time.php") return Math.floor(Date.now() / 1000) + "=";
+
+        return Object.prototype.hasOwnProperty.call(ANSWERS, name) ? ANSWERS[name] : GENERIC;
+    }
+
+    // Null unless the first segment is one of the game's own folders, so a genuine
+    // site-root asset is never redirected by accident.
+    function rebase(pathname) {
+        if (folder.length <= 1 || pathname.indexOf(folder) === 0) return null;
+
+        const first = pathname.replace(/^\/+/, "").split("/")[0];
+
+        return GAME_DIRS.indexOf(first) === -1 ? null : folder + pathname.replace(/^\/+/, "");
+    }
+
     window.fetch = function (input, init) {
         try {
             const raw = typeof input === "string" ? input : (input && input.url) || "",
                   url = new URL(raw, location.href);
 
-            // A static host can only answer a .php call with 501/405 - there is nothing
-            // it could run. Answer here instead, before Ruffle ever sends it. The test
-            // is the route name rather than the folder: getPrefix answers "", so the
-            // client resolves paths like "photos//get_scene_photos.php" against the
-            // mirror itself, inside the folder where sw.js has no route for them.
-            if (url.origin === location.origin && /\.php$/i.test(url.pathname)) {
-                const name = url.pathname.split("/").pop();
-
-                if (WORKER_OWNS[name] !== 1) {
-                    // time.php's reply carries no key: sendAndLoad reads the parameter
-                    // NAME as the timestamp ("for(_loc1_ in receiver) islandTimes[island]
-                    // .end = _loc1_"), so a named flag like ok=1 becomes a bogus clock
-                    // reading.
-                    if (name === "time.php")
-                        return answer(Math.floor(Date.now() / 1000) + "=");
-
-                    return answer(Object.prototype.hasOwnProperty.call(ANSWERS, name) ? ANSWERS[name] : GENERIC);
+            if (url.origin === location.origin) {
+                // A static host can only answer a .php call with 501/405 - there is
+                // nothing it could run. Answer here instead, except for the routes
+                // sw.js implements. The test is the route name rather than the folder:
+                // getPrefix answers "", so the client resolves paths like
+                // "photos//get_scene_photos.php" against the mirror itself, inside the
+                // folder where sw.js has no route for them.
+                if (/\.php$/i.test(url.pathname)) {
+                    if (WORKER_OWNS[url.pathname.split("/").pop()] !== 1)
+                        return answer(phpBody(url.pathname));
+                } else {
+                    const moved = rebase(url.pathname);
+                    if (moved) return realFetch(moved, init);
                 }
             }
         } catch (err) { }
 
         return realFetch(input, init);
     };
+
+    // Ruffle's LoadVars and its asset loader use XMLHttpRequest, which the patch above
+    // never sees. That is how a live page asked the site root for
+    // framework/data/config.xml: getPrefix.php went out by XHR, the static host answered
+    // 405, the client fell back to a root base, and every relative asset 404'd. Answering
+    // at the object level makes the page right whether or not a worker controls it yet.
+    const RealXHR = window.XMLHttpRequest;
+
+    if (RealXHR) {
+        const realOpen = RealXHR.prototype.open,
+              realSend = RealXHR.prototype.send;
+
+        RealXHR.prototype.open = function (method, url) {
+            const args = Array.prototype.slice.call(arguments);
+
+            try {
+                const abs = new URL(String(url), location.href);
+
+                if (abs.origin === location.origin) {
+                    delete this.__popBody;
+
+                    if (/\.php$/i.test(abs.pathname) && WORKER_OWNS[abs.pathname.split("/").pop()] !== 1) {
+                        // Opened but never sent: send() below answers it in place.
+                        this.__popBody = phpBody(abs.pathname);
+                        args[1] = abs.href;
+                    } else if (!/\.php$/i.test(abs.pathname)) {
+                        const moved = rebase(abs.pathname);
+                        if (moved) args[1] = moved;
+                    }
+                }
+            } catch (err) { }
+
+            return realOpen.apply(this, args);
+        };
+
+        RealXHR.prototype.send = function () {
+            if (this.__popBody === undefined)
+                return realSend.apply(this, arguments);
+
+            const xhr = this,
+                  text = this.__popBody,
+                  type = this.responseType;
+
+            setTimeout(function () {
+                const fix = function (key, value) {
+                    Object.defineProperty(xhr, key, { configurable: true, get: function () { return value; } });
+                };
+
+                fix("readyState", 4);
+                fix("status", 200);
+                fix("statusText", "OK");
+
+                if (type === "arraybuffer") {
+                    fix("responseText", "");
+                    fix("response", new TextEncoder().encode(text).buffer);
+                } else if (type === "json") {
+                    let parsed = null;
+                    try { parsed = JSON.parse(text); } catch (err) { }
+                    fix("responseText", text);
+                    fix("response", parsed);
+                } else {
+                    fix("responseText", text);
+                    fix("response", text);
+                }
+
+                const fire = function (kind) {
+                    let event;
+                    try { event = new Event(kind); } catch (err) { event = { type: kind }; }
+
+                    try { xhr.dispatchEvent(event); } catch (err) { }
+
+                    const inline = xhr["on" + kind];
+                    if (typeof inline === "function") inline.call(xhr, event);
+                };
+
+                fire("readystatechange");
+                fire("load");
+                fire("loadend");
+            }, 0);
+        };
+    }
 })();
 
 // Local accounts: sw.js answers login.php / part-register.php / register.php from
